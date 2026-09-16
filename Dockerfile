@@ -29,13 +29,23 @@ RUN go build -ldflags "-s -w -X 'github.com/QuantumNous/new-api/common.Version=$
 
 FROM debian:bookworm-slim@sha256:f06537653ac770703bc45b4b113475bd402f451e85223f0f2837acbf89ab020a
 
+ARG BUILD_REVISION=unknown
+LABEL org.opencontainers.image.source="https://github.com/QuantumNous/new-api" \
+      org.opencontainers.image.revision="${BUILD_REVISION}" \
+      org.opencontainers.image.licenses="AGPL-3.0-only"
+
 RUN apt-get update \
     && apt-get install -y --no-install-recommends ca-certificates tzdata libasan8 wget \
     && rm -rf /var/lib/apt/lists/* \
-    && update-ca-certificates
+    && update-ca-certificates \
+    && groupadd --gid 10001 newapi \
+    && useradd --uid 10001 --gid 10001 --no-create-home --shell /usr/sbin/nologin newapi \
+    && mkdir -p /data /app/logs \
+    && chown -R 10001:10001 /data /app
 
 COPY --from=builder2 /build/new-api /
 COPY LICENSE NOTICE THIRD-PARTY-LICENSES.md /licenses/
 EXPOSE 3000
 WORKDIR /data
+USER 10001:10001
 ENTRYPOINT ["/new-api"]

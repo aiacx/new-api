@@ -1,6 +1,8 @@
 package model
 
 import (
+	"crypto/tls"
+	"crypto/x509"
 	"fmt"
 	"log"
 	"net/url"
@@ -13,6 +15,7 @@ import (
 	"github.com/QuantumNous/new-api/constant"
 
 	"github.com/glebarez/sqlite"
+	drivermysql "github.com/go-sql-driver/mysql"
 	"gorm.io/driver/clickhouse"
 	"gorm.io/driver/mysql"
 	"gorm.io/driver/postgres"
@@ -66,6 +69,41 @@ func initCol() {
 var DB *gorm.DB
 
 var LOG_DB *gorm.DB
+
+var mysqlTLSConfig struct {
+	sync.Once
+	err error
+}
+
+func ensurePanstarMySQLTLS() error {
+	caFile := strings.TrimSpace(os.Getenv("MYSQL_TLS_CA_FILE"))
+	if caFile == "" {
+		return nil
+	}
+	mysqlTLSConfig.Do(func() {
+		serverName := strings.TrimSpace(os.Getenv("MYSQL_TLS_SERVER_NAME"))
+		if serverName == "" {
+			mysqlTLSConfig.err = fmt.Errorf("MYSQL_TLS_SERVER_NAME is required with MYSQL_TLS_CA_FILE")
+			return
+		}
+		pem, err := os.ReadFile(caFile)
+		if err != nil {
+			mysqlTLSConfig.err = fmt.Errorf("read MySQL TLS CA: %w", err)
+			return
+		}
+		roots := x509.NewCertPool()
+		if !roots.AppendCertsFromPEM(pem) {
+			mysqlTLSConfig.err = fmt.Errorf("MYSQL_TLS_CA_FILE contains no certificates")
+			return
+		}
+		mysqlTLSConfig.err = drivermysql.RegisterTLSConfig("panstar-verify", &tls.Config{
+			MinVersion: tls.VersionTLS12,
+			RootCAs:    roots,
+			ServerName: serverName,
+		})
+	})
+	return mysqlTLSConfig.err
+}
 
 func createRootAccountIfNeed() error {
 	var user User
@@ -166,6 +204,9 @@ func chooseDB(envName string, isLog bool) (*gorm.DB, common.DatabaseType, error)
 		}
 		// Use MySQL
 		common.SysLog("using MySQL as database")
+		if err := ensurePanstarMySQLTLS(); err != nil {
+			return nil, "", err
+		}
 		// check parseTime
 		if !strings.Contains(dsn, "parseTime") {
 			if strings.Contains(dsn, "?") {
@@ -173,6 +214,9 @@ func chooseDB(envName string, isLog bool) (*gorm.DB, common.DatabaseType, error)
 			} else {
 				dsn += "?parseTime=true"
 			}
+		}
+		if strings.TrimSpace(os.Getenv("MYSQL_TLS_CA_FILE")) != "" && !strings.Contains(dsn, "tls=") {
+			dsn += "&tls=panstar-verify"
 		}
 		db, err := gorm.Open(mysqlMigrationDialector{mysql.Dialector{Config: &mysql.Config{DSN: dsn}}}, newGormConfig(true))
 		return db, common.DatabaseTypeMySQL, err

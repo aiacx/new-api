@@ -299,6 +299,12 @@ func TokenAuthReadOnly() func(c *gin.Context) {
 		if strings.HasPrefix(key, "Bearer ") || strings.HasPrefix(key, "bearer ") {
 			key = strings.TrimSpace(key[7:])
 		}
+		if authenticateExternalBillingService(c, key) {
+			if !c.IsAborted() {
+				c.Next()
+			}
+			return
+		}
 		key = strings.TrimPrefix(key, "sk-")
 		parts := strings.Split(key, "-")
 		key = parts[0]
@@ -388,6 +394,12 @@ func TokenAuth() func(c *gin.Context) {
 		parts := make([]string, 0)
 		if strings.HasPrefix(key, "Bearer ") || strings.HasPrefix(key, "bearer ") {
 			key = strings.TrimSpace(key[7:])
+		}
+		if authenticateExternalBillingService(c, key) {
+			if !c.IsAborted() {
+				c.Next()
+			}
+			return
 		}
 		if key == "" || key == "midjourney-proxy" {
 			key = c.Request.Header.Get("mj-api-secret")

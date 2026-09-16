@@ -155,6 +155,11 @@ func PreWssConsumeQuota(ctx *gin.Context, relayInfo *relaycommon.RelayInfo, usag
 
 func PostWssConsumeQuota(ctx *gin.Context, relayInfo *relaycommon.RelayInfo, modelName string,
 	usage *dto.RealtimeUsage, extraContent string) {
+	if IsExternalBilling(ctx) {
+		logger.LogInfo(ctx, fmt.Sprintf("external billing realtime usage observed requestId=%s model=%s total=%d",
+			relayInfo.RequestId, modelName, usage.TotalTokens))
+		return
+	}
 
 	var tieredResult *billingexpr.TieredResult
 	tieredOk, tieredQuota, tieredRes := TryTieredSettle(relayInfo, billingexpr.TokenParams{
@@ -283,6 +288,11 @@ func CalcOpenRouterCacheCreateTokens(usage dto.Usage, priceData types.PriceData)
 }
 
 func PostAudioConsumeQuota(ctx *gin.Context, relayInfo *relaycommon.RelayInfo, usage *dto.Usage, extraContent string) {
+	if IsExternalBilling(ctx) {
+		logger.LogInfo(ctx, fmt.Sprintf("external billing audio usage observed requestId=%s model=%s prompt=%d completion=%d",
+			relayInfo.RequestId, relayInfo.GetBillingModelName(), usagePromptTokens(usage), usageCompletionTokens(usage)))
+		return
+	}
 	if usage == nil {
 		usage = &dto.Usage{PromptTokens: relayInfo.GetEstimatePromptTokens(), TotalTokens: relayInfo.GetEstimatePromptTokens()}
 	}

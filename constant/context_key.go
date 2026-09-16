@@ -21,6 +21,10 @@ const (
 	ContextKeyTokenModelLimit        ContextKey = "token_model_limit"
 	ContextKeyTokenCrossGroupRetry   ContextKey = "token_cross_group_retry"
 	ContextKeyTokenAutoGroups        ContextKey = "token_auto_groups"
+	// ContextKeyExternalBilling marks an authenticated internal service token
+	// whose customer billing is owned by an upstream gateway. It is never
+	// derived from a public user token.
+	ContextKeyExternalBilling ContextKey = "external_billing"
 
 	/* channel related keys */
 	ContextKeyChannelId                ContextKey = "channel_id"
