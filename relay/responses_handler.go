@@ -36,22 +36,7 @@ func ResponsesHelper(c *gin.Context, info *relaycommon.RelayInfo) (newAPIError *
 	case *dto.OpenAIResponsesRequest:
 		responsesReq = req
 	case *dto.OpenAIResponsesCompactionRequest:
-		// Only fields documented for POST /v1/responses/compact are forwarded:
-		// model, input, instructions, previous_response_id, prompt_cache_key,
-		// prompt_cache_options, prompt_cache_retention, service_tier.
-		// Undocumented Codex-parity fields (tools, reasoning, text) are parsed
-		// for client compatibility but intentionally not sent upstream.
-		responsesReq = &dto.OpenAIResponsesRequest{
-			Model:                req.Model,
-			Input:                req.Input,
-			Instructions:         req.Instructions,
-			PreviousResponseID:   req.PreviousResponseID,
-			ParallelToolCalls:    req.ParallelToolCalls,
-			ServiceTier:          req.ServiceTier,
-			PromptCacheKey:       req.PromptCacheKey,
-			PromptCacheOptions:   req.PromptCacheOptions,
-			PromptCacheRetention: req.PromptCacheRetention,
-		}
+		responsesReq = responsesRequestFromCompaction(req)
 	default:
 		return types.NewErrorWithStatusCode(
 			fmt.Errorf("invalid request type, expected dto.OpenAIResponsesRequest or dto.OpenAIResponsesCompactionRequest, got %T", info.Request),
@@ -111,7 +96,7 @@ func ResponsesHelper(c *gin.Context, info *relaycommon.RelayInfo) (newAPIError *
 			}
 		}
 
-		logger.LogDebug(c, "requestBody: %s", jsonData)
+		logger.LogDebug(c, "Responses request prepared bytes=%d", len(jsonData))
 		body, closer, err := relaycommon.NewOutboundJSONBody(jsonData)
 		if err != nil {
 			return types.NewError(err, types.ErrorCodeConvertRequestFailed, types.ErrOptionWithSkipRetry())
@@ -171,4 +156,25 @@ func ResponsesHelper(c *gin.Context, info *relaycommon.RelayInfo) (newAPIError *
 		service.PostTextConsumeQuota(c, info, usageDto, nil)
 	}
 	return nil
+}
+
+// responsesRequestFromCompaction keeps the full client-visible compact
+// contract when the relay adapter internally reuses the Responses request
+// path. In particular, Codex can include tool declarations, reasoning and
+// text settings that must survive a standalone compaction request.
+func responsesRequestFromCompaction(req *dto.OpenAIResponsesCompactionRequest) *dto.OpenAIResponsesRequest {
+	return &dto.OpenAIResponsesRequest{
+		Model:                req.Model,
+		Input:                req.Input,
+		Instructions:         req.Instructions,
+		PreviousResponseID:   req.PreviousResponseID,
+		Tools:                req.Tools,
+		ParallelToolCalls:    req.ParallelToolCalls,
+		Reasoning:            req.Reasoning,
+		ServiceTier:          req.ServiceTier,
+		PromptCacheKey:       req.PromptCacheKey,
+		PromptCacheOptions:   req.PromptCacheOptions,
+		PromptCacheRetention: req.PromptCacheRetention,
+		Text:                 req.Text,
+	}
 }

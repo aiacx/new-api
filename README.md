@@ -324,7 +324,12 @@ docker run --name new-api -d --restart always \
 | `USER_SESSION_REVOKED_RETENTION_DAYS` | Days to retain revoked Session rows for audit and issuance accounting | `7` |
 | `USER_SESSION_HOURLY_ALERT_THRESHOLD` | Global Sessions created per hour that triggers an alert only; it never blocks login | `5000` |
 | `CRYPTO_SECRET` | HMAC secret for cache keys; nodes sharing Redis must use the same effective value | Defaults to `SESSION_SECRET` |
+| `EXTERNAL_BILLING_ENABLED` | Enables the private, digest-authenticated external-billing service identity. Keep disabled for public New API installations | `false` |
+| `EXTERNAL_BILLING_BEARER_SHA256` | Lowercase SHA-256 of the private service bearer; the raw bearer is not stored by New API | - |
+| `EXTERNAL_BILLING_USER_ID` | Enabled internal service user whose group controls channel access; no API token row is created | - |
 | `SQL_DSN` | Database connection string | - |
+| `MYSQL_TLS_CA_FILE` | Optional PEM CA file; when set, New API registers a strict MySQL TLS profile and adds it to DSNs without an explicit `tls` option | - |
+| `MYSQL_TLS_SERVER_NAME` | Required certificate DNS name when `MYSQL_TLS_CA_FILE` is set | - |
 | `REDIS_CONN_STRING` | Redis connection string | - |
 | `RELAY_IDLE_CONN_TIMEOUT` | Idle keep-alive timeout for relay HTTP clients, seconds. Defaults to Go standard library behavior; set `0` to disable | `90` |
 | `RELAY_RESPONSE_HEADER_TIMEOUT` | How long the relay waits for upstream **response headers**, seconds; set `0` to disable. Only bounds the header wait -- streaming after the headers arrive is unaffected. Note that non-streaming upstreams usually send headers only once generation finishes, so leave headroom | `1800` |

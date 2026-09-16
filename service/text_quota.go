@@ -393,6 +393,7 @@ func usageSemanticFromUsage(relayInfo *relaycommon.RelayInfo, usage *dto.Usage) 
 }
 
 func PostTextConsumeQuota(ctx *gin.Context, relayInfo *relaycommon.RelayInfo, usage *dto.Usage, extraContent []string) {
+	externalBilling := IsExternalBilling(ctx)
 	originUsage := usage
 	billingUsage := effectiveBillingUsage(usage)
 	if usage == nil {
@@ -450,17 +451,27 @@ func PostTextConsumeQuota(ctx *gin.Context, relayInfo *relaycommon.RelayInfo, us
 		q := decimal.NewFromFloat(summary.AudioInputPrice).Div(decimal.NewFromInt(1000000)).Mul(decimal.NewFromInt(int64(summary.AudioTokens))).Mul(decimal.NewFromFloat(summary.GroupRatio)).Mul(decimal.NewFromFloat(common.QuotaPerUnit))
 		extraContent = append(extraContent, fmt.Sprintf("Audio Input 花费 %s", logger.LogQuota(common.QuotaFromDecimal(q))))
 	}
+	externalEstimatedQuota := 0
+	if externalBilling {
+		externalEstimatedQuota = summary.Quota
+		summary.Quota = 0
+		extraContent = append(extraContent, "external billing: Panstar owns customer settlement")
+		logger.LogInfo(ctx, fmt.Sprintf("external billing usage observed requestId=%s model=%s prompt=%d completion=%d",
+			relayInfo.RequestId, relayInfo.GetBillingModelName(), usagePromptTokens(usage), usageCompletionTokens(usage)))
+	}
 
 	if !summary.hasBillableUsage() {
 		extraContent = append(extraContent, "上游没有返回计费信息，无法扣费（可能是上游超时）")
 		logger.LogError(ctx, fmt.Sprintf("total tokens is 0, cannot consume quota, userId %d, channelId %d, tokenId %d, model %s， pre-consumed quota %d", relayInfo.UserId, relayInfo.ChannelId, relayInfo.TokenId, summary.ModelName, relayInfo.FinalPreConsumedQuota))
-	} else {
+	} else if !externalBilling {
 		model.UpdateUserUsedQuotaAndRequestCount(relayInfo.UserId, summary.Quota)
 		model.UpdateChannelUsedQuota(relayInfo.ChannelId, summary.Quota)
 	}
 
-	if err := SettleBilling(ctx, relayInfo, summary.Quota); err != nil {
-		logger.LogError(ctx, "error settling billing: "+err.Error())
+	if !externalBilling {
+		if err := SettleBilling(ctx, relayInfo, summary.Quota); err != nil {
+			logger.LogError(ctx, "error settling billing: "+err.Error())
+		}
 	}
 
 	logModel := summary.ModelName
@@ -490,6 +501,10 @@ func PostTextConsumeQuota(ctx *gin.Context, relayInfo *relaycommon.RelayInfo, us
 	appendUsageBillingPathForLog(other, common.GetContextKeyBool(ctx, constant.ContextKeyLocalCountTokens), originUsage)
 	if adminRejectReason != "" {
 		other.SetAdmin("reject_reason", adminRejectReason)
+	}
+	if externalBilling {
+		other.SetAdmin("external_billing", true)
+		other.SetAdmin("external_estimated_quota", externalEstimatedQuota)
 	}
 	if summary.ImageTokens != 0 {
 		other.SetPublic("image", true)
