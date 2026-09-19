@@ -32,7 +32,9 @@ docker buildx build --platform linux/amd64 --load \
   || { echo 'candidate image is not linux/amd64' >&2; exit 1; }
 [[ "$(docker image inspect -f '{{index .Config.Labels "org.opencontainers.image.revision"}}' "$image")" == "$source_commit" ]] \
   || { echo 'candidate image revision label mismatch' >&2; exit 1; }
-docker run --rm --network none "$image" -version
+version_readback="$(docker run --rm --platform linux/amd64 --network none "$image" -version)"
+[[ "$version_readback" == "$upstream_tag" ]] \
+  || { echo 'candidate runtime version readback mismatch' >&2; exit 1; }
 
 docker save "$image" | gzip -1 > "$artifact_dir/${image##*:}.tar.gz"
 docker scout sbom --format spdx --output "$artifact_dir/${image##*:}.spdx.json" "local://$image"
@@ -43,7 +45,7 @@ jq -n --arg tag "$upstream_tag" --arg upstream "$upstream_commit" \
   --arg source "$source_commit" --arg image "$image" --arg imageId "$image_id" \
   --arg archiveSha "$archive_sha" --arg sbomSha "$sbom_sha" \
   '{upstreamTag:$tag, upstreamCommit:$upstream, panstarCommit:$source,
-    dirty:false, platform:"linux/amd64", imageTag:$image, imageId:$imageId,
+    dirty:false, platform:"linux/amd64", versionReadback:$tag, imageTag:$image, imageId:$imageId,
     imageArchiveSha256:$archiveSha, sbomSha256:$sbomSha}' \
   > "$artifact_dir/build-evidence.json"
 echo "PANSTAR_NEWAPI_BUILD=PASS image=$image id=$image_id"
