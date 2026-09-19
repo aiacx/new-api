@@ -27,7 +27,10 @@ func TestPanstarManagedAdvancedCustomKeepsResponsesAndCompactBodies(t *testing.T
 		{path: "/v1/responses/compact", format: types.RelayFormatOpenAIResponsesCompaction},
 	} {
 		t.Run(test.path, func(t *testing.T) {
-			raw := []byte(`{"model":"gpt-6-astra", "input":[{"type":"additional_tools","role":"developer","tools":[{"type":"custom","name":"exec"}]},{"type":"compaction","encrypted_content":"opaque-synthetic"}], "tools":[{"type":"custom","name":"shell"},{"type":"function","name":"status"}], "instructions":"synthetic"}`)
+			raw := []byte(`{"model":"gpt-6-astra", "input":[{"type":"additional_tools","role":"developer","tools":[{"type":"custom","name":"exec"}]},{"type":"compaction","encrypted_content":"opaque-synthetic"}], "tools":[{"type":"custom","name":"shell"},{"type":"function","name":"status"}], "instructions":"synthetic", "prompt_cache_key":"a3f0186c36bb3035bfac40f69a6ab44e53f74e69568fb496e54cd55461778b2", "wire_extension":{"version":1}}`)
+			if test.path == "/v1/responses" {
+				raw = []byte(`{"model":"gpt-6-astra", "input":[{"type":"additional_tools","role":"developer","tools":[{"type":"custom","name":"exec"}]},{"type":"compaction","encrypted_content":"opaque-synthetic"}], "tools":[{"type":"custom","name":"shell"},{"type":"function","name":"status"}], "instructions":"synthetic", "prompt_cache_key":"a3f0186c36bb3035bfac40f69a6ab44e53f74e69568fb496e54cd55461778b2", "context_management":[{"type":"compaction","compact_threshold":1024}], "wire_extension":{"version":1}}`)
+			}
 			if test.path == "/v1/chat/completions" {
 				raw = []byte(`{"model":"gpt-6-astra", "messages":[{"role":"user","content":"synthetic"}], "tools":[{"type":"function","function":{"name":"status","parameters":{"type":"object"}}}]}`)
 			}
