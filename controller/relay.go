@@ -166,6 +166,13 @@ func Relay(c *gin.Context, relayFormat types.RelayFormat) {
 			newAPIError = channelErr
 			break
 		}
+		if !service.ManagedExternalBillingChannelMatches(c, channel.Id) {
+			newAPIError = types.NewErrorWithStatusCode(
+				errors.New("managed external billing channel drift"),
+				types.ErrorCodeInvalidRequest, http.StatusServiceUnavailable,
+				types.ErrOptionWithSkipRetry())
+			break
+		}
 		service.AppendUsedChannel(c, channel.Id)
 		if service.IsExternalBilling(c) {
 			c.Header("X-Panstar-NewAPI-Channel-Id", fmt.Sprint(channel.Id))

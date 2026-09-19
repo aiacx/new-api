@@ -86,6 +86,9 @@ func ClaudeErrorWrapperLocal(err error, code string, statusCode int) *dto.Claude
 
 func RelayErrorHandler(ctx context.Context, resp *http.Response, showBodyWhenFail bool) (newApiErr *types.NewAPIError) {
 	newApiErr = types.InitOpenAIError(types.ErrorCodeBadResponseStatusCode, resp.StatusCode)
+	if ExternalBillingFromContext(ctx) {
+		showBodyWhenFail = false
+	}
 
 	responseBody, err := io.ReadAll(resp.Body)
 	if err != nil {
@@ -95,6 +98,9 @@ func RelayErrorHandler(ctx context.Context, resp *http.Response, showBodyWhenFai
 	var errResponse dto.GeneralErrorResponse
 	responseBodyText := string(responseBody)
 	responseBodyPreview := common.LocalLogPreview(responseBodyText)
+	if ExternalBillingFromContext(ctx) {
+		responseBodyPreview = fmt.Sprintf("[redacted bytes=%d]", len(responseBody))
+	}
 	buildErrWithBody := func(message string) error {
 		if message == "" {
 			return fmt.Errorf("bad response status code %d, body: %s", resp.StatusCode, responseBodyText)

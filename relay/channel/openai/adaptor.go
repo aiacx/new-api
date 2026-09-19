@@ -778,7 +778,12 @@ func (a *Adaptor) DoResponse(c *gin.Context, resp *http.Response, info *relaycom
 		usage, err = common_handler.RerankHandler(c, info, resp)
 	case relayconstant.RelayModeResponses:
 		if info.IsStream {
-			usage, err = OaiResponsesStreamHandler(c, info, resp)
+			if service.IsExternalBilling(c) && info.ChannelType == constant.ChannelTypeAdvancedCustom &&
+				info.ChannelSetting.PassThroughBodyEnabled {
+				usage, err = OaiResponsesRawStreamHandler(c, info, resp)
+			} else {
+				usage, err = OaiResponsesStreamHandler(c, info, resp)
+			}
 		} else {
 			usage, err = OaiResponsesHandler(c, info, resp)
 		}
@@ -786,7 +791,12 @@ func (a *Adaptor) DoResponse(c *gin.Context, resp *http.Response, info *relaycom
 		usage, err = OaiResponsesCompactionHandler(c, resp)
 	default:
 		if info.IsStream {
-			usage, err = OaiStreamHandler(c, info, resp)
+			if service.IsExternalBilling(c) && info.ChannelType == constant.ChannelTypeAdvancedCustom &&
+				info.ChannelSetting.PassThroughBodyEnabled {
+				usage, err = OaiResponsesRawStreamHandler(c, info, resp)
+			} else {
+				usage, err = OaiStreamHandler(c, info, resp)
+			}
 		} else {
 			usage, err = OpenaiHandler(c, info, resp)
 		}

@@ -19,18 +19,40 @@ import (
 )
 
 var panstarRequestIDPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._:-]{7,127}$`)
+var managedBillingGroupPattern = regexp.MustCompile(`^[A-Za-z][A-Za-z0-9_-]{2,63}$`)
 
 // authenticateExternalBillingService recognizes a private Panstar service
 // credential by digest. The raw credential never needs a tokens-table row.
 func authenticateExternalBillingService(c *gin.Context, bearer string) bool {
-	if !common.GetEnvOrDefaultBool("EXTERNAL_BILLING_ENABLED", false) ||
-		!externalBillingBearerMatches(bearer, os.Getenv("EXTERNAL_BILLING_BEARER_SHA256")) {
+	if !common.GetEnvOrDefaultBool("EXTERNAL_BILLING_ENABLED", false) {
 		return false
 	}
-	userID, err := strconv.Atoi(strings.TrimSpace(os.Getenv("EXTERNAL_BILLING_USER_ID")))
+	primary := externalBillingBearerMatches(bearer, os.Getenv("EXTERNAL_BILLING_BEARER_SHA256"))
+	managed := externalBillingBearerMatches(bearer, os.Getenv("EXTERNAL_BILLING_MANAGED_BEARER_SHA256"))
+	if !primary && !managed {
+		return false
+	}
+	if primary && managed {
+		abortExternalBilling(c, "external_billing_identity_ambiguous")
+		return true
+	}
+	userIDEnv := "EXTERNAL_BILLING_USER_ID"
+	expectedGroup := ""
+	if managed {
+		userIDEnv = "EXTERNAL_BILLING_MANAGED_USER_ID"
+		expectedGroup = strings.TrimSpace(os.Getenv("EXTERNAL_BILLING_MANAGED_GROUP"))
+	}
+	userID, err := strconv.Atoi(strings.TrimSpace(os.Getenv(userIDEnv)))
 	if err != nil || userID <= 0 {
 		abortExternalBilling(c, "external_billing_identity_invalid")
 		return true
+	}
+	if managed {
+		primaryID, parseErr := strconv.Atoi(strings.TrimSpace(os.Getenv("EXTERNAL_BILLING_USER_ID")))
+		if parseErr != nil || primaryID == userID || !validManagedBillingGroup(expectedGroup) {
+			abortExternalBilling(c, "external_billing_identity_invalid")
+			return true
+		}
 	}
 	user, err := model.GetUserCache(userID)
 	if err != nil {
@@ -41,6 +63,19 @@ func authenticateExternalBillingService(c *gin.Context, bearer string) bool {
 	if user.Status != common.UserStatusEnabled {
 		abortExternalBilling(c, "external_billing_user_disabled")
 		return true
+	}
+	if managed && user.Group != expectedGroup {
+		abortExternalBilling(c, "external_billing_group_invalid")
+		return true
+	}
+	if managed {
+		channelID, parseErr := strconv.Atoi(strings.TrimSpace(
+			os.Getenv("EXTERNAL_BILLING_MANAGED_CHANNEL_ID")))
+		if parseErr != nil || channelID <= 0 {
+			abortExternalBilling(c, "external_billing_channel_invalid")
+			return true
+		}
+		c.Set("external_billing_managed_channel_id", channelID)
 	}
 	requestID := c.GetHeader("X-Panstar-Request-Id")
 	if !panstarRequestIDPattern.MatchString(requestID) {
@@ -62,8 +97,15 @@ func authenticateExternalBillingService(c *gin.Context, bearer string) bool {
 	c.Set(common.RequestIdKey, requestID)
 	c.Header(common.RequestIdKey, requestID)
 	c.Header("X-Panstar-Request-Id", requestID)
-	c.Request = c.Request.WithContext(context.WithValue(c.Request.Context(), common.RequestIdKey, requestID))
+	requestContext := context.WithValue(c.Request.Context(), common.RequestIdKey, requestID)
+	c.Request = c.Request.WithContext(context.WithValue(requestContext,
+		string(constant.ContextKeyExternalBilling), true))
 	return true
+}
+
+func validManagedBillingGroup(group string) bool {
+	return group != "" && group != "default" &&
+		managedBillingGroupPattern.MatchString(group)
 }
 
 func externalBillingBearerMatches(bearer, expectedHex string) bool {

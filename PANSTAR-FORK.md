@@ -10,6 +10,8 @@ for production by its maintainers.
 Panstar-specific changes are deliberately limited to the private relay role:
 
 - digest-authenticated service identity without a plaintext API token row;
+- optional second digest-authenticated identity bound to a separate managed
+  canary user/group/channel ID; it must not share the primary service user ID;
 - external customer-billing bypass while retaining zero-charge usage evidence;
 - no request/response body in the private relay's debug logs;
 - verified request ID and actual selected channel ID on the private response;
@@ -37,6 +39,18 @@ per-path passthrough, an isolated group, no converter, and no automatic
 cross-channel retry. Keep existing channels untouched until the full Gateway
 raw-data-plane and accounting contract is proven. Never configure Sub2API,
 enable top-up, or claim WebSocket/hosted-tools capability from this candidate.
+
+For the managed identity, set all four values together:
+`EXTERNAL_BILLING_MANAGED_BEARER_SHA256`, `EXTERNAL_BILLING_MANAGED_USER_ID`,
+`EXTERNAL_BILLING_MANAGED_GROUP` and `EXTERNAL_BILLING_MANAGED_CHANNEL_ID`.
+The user must be distinct from the primary service user and belong exactly to
+the dedicated group. The channel ID is checked after selection but before any
+upstream dispatch; a missing or different channel fails closed. The Gateway
+uses a separate managed service bearer only for a frozen allowlisted route and
+checks the response request ID and actual channel ID. The New API raw SSE
+branch preserves provider frames for Panstar external billing; Panstar alone
+observes usage and settles customer credit. The private service does not
+rewrite requests or persist customer prompt, tool or opaque plaintext.
 
 The service must remain private. Panstar user credentials terminate at the
 Panstar Gateway and must never be sent to this process. The fork remains

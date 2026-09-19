@@ -35,3 +35,14 @@ func TestPanstarRequestIDRequiresSafeBoundedIdentifier(t *testing.T) {
 		}
 	}
 }
+
+func TestManagedBillingRequiresDedicatedGroup(t *testing.T) {
+	if !validManagedBillingGroup("panstar_pipio_managed") {
+		t.Fatal("dedicated managed group rejected")
+	}
+	for _, group := range []string{"", "default", "a", "comma,group", "unicode组"} {
+		if validManagedBillingGroup(group) {
+			t.Fatalf("unsafe managed group accepted: %q", group)
+		}
+	}
+}
