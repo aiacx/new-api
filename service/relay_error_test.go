@@ -57,6 +57,17 @@ func TestShouldRetryRelayErrorHonorsChannelPinOnChannelError(t *testing.T) {
 	}
 }
 
+func TestExternalBillingNeverRetriesOrSwitchesChannel(t *testing.T) {
+	c, _ := gin.CreateTestContext(httptest.NewRecorder())
+	c.Set(string(constant.ContextKeyExternalBilling), true)
+	for _, code := range []int{http.StatusTooManyRequests, http.StatusInternalServerError} {
+		err := types.NewOpenAIError(errors.New("synthetic upstream failure"), types.ErrorCodeBadResponseStatusCode, code)
+		decision := DecideRelayRetry(c, err, 3)
+		require.Equal(t, "stop", decision.Action)
+		require.Equal(t, "panstar_frozen_route", decision.Reason)
+	}
+}
+
 func TestProcessChannelErrorMasksDisableReasonAndNotification(t *testing.T) {
 	previousDB, previousType := model.DB, common.MainDatabaseType()
 	previousCache, previousRedis := common.MemoryCacheEnabled, common.RedisEnabled

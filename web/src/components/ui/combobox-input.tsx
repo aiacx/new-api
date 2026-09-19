@@ -135,7 +135,9 @@ export function ComboboxInput({
     const input = inputRef.current
     if (!input) return
     const container =
-      input.closest<HTMLElement>('[role="dialog"]') ?? document.body
+      input.closest<HTMLElement>('[data-combobox-portal-container]') ??
+      input.closest<HTMLElement>('[role="dialog"]') ??
+      document.body
     const measure = () => {
       const rect = input.getBoundingClientRect()
       setDropdown({

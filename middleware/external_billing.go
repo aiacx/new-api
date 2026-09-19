@@ -1,11 +1,13 @@
 package middleware
 
 import (
+	"context"
 	"crypto/sha256"
 	"crypto/subtle"
 	"encoding/hex"
 	"net/http"
 	"os"
+	"regexp"
 	"strconv"
 	"strings"
 
@@ -15,6 +17,8 @@ import (
 	"github.com/QuantumNous/new-api/model"
 	"github.com/gin-gonic/gin"
 )
+
+var panstarRequestIDPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._:-]{7,127}$`)
 
 // authenticateExternalBillingService recognizes a private Panstar service
 // credential by digest. The raw credential never needs a tokens-table row.
@@ -38,6 +42,11 @@ func authenticateExternalBillingService(c *gin.Context, bearer string) bool {
 		abortExternalBilling(c, "external_billing_user_disabled")
 		return true
 	}
+	requestID := c.GetHeader("X-Panstar-Request-Id")
+	if !panstarRequestIDPattern.MatchString(requestID) {
+		abortExternalBilling(c, "external_billing_request_id_invalid")
+		return true
+	}
 
 	user.WriteContext(c)
 	common.SetContextKey(c, constant.ContextKeyUsingGroup, user.Group)
@@ -50,6 +59,10 @@ func authenticateExternalBillingService(c *gin.Context, bearer string) bool {
 	digest := sha256.Sum256([]byte(bearer))
 	c.Set(string(constant.ContextKeyExternalBilling), true)
 	c.Set("external_billing_token_sha256_prefix", hex.EncodeToString(digest[:4]))
+	c.Set(common.RequestIdKey, requestID)
+	c.Header(common.RequestIdKey, requestID)
+	c.Header("X-Panstar-Request-Id", requestID)
+	c.Request = c.Request.WithContext(context.WithValue(c.Request.Context(), common.RequestIdKey, requestID))
 	return true
 }
 

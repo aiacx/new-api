@@ -344,7 +344,10 @@ export function CommonLogsFilterBar<TData>(
     </LogsFilterField>
   )
   const groupFilter = (
-    <LogsFilterField className={sensitiveInputClass}>
+    <LogsFilterField
+      className={sensitiveInputClass}
+      portalDropdown={!sensitiveVisible}
+    >
       <Combobox
         options={groupOptions}
         allowCustomValue

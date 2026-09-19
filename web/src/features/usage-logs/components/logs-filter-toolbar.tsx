@@ -63,11 +63,13 @@ interface LogsFilterFieldProps {
   children: ReactNode
   wide?: boolean
   className?: string
+  portalDropdown?: boolean
 }
 
 export function LogsFilterField(props: LogsFilterFieldProps) {
   return (
     <div
+      data-combobox-portal-container={props.portalDropdown ? '' : undefined}
       className={cn(
         'min-w-0 [&_[data-slot=select-trigger]]:w-full [&_[data-slot=select-trigger]]:text-sm [&_[data-slot=select-value]]:leading-5',
         props.wide && 'sm:col-span-2',

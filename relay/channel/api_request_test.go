@@ -6,11 +6,24 @@ import (
 	"net/http/httptest"
 	"testing"
 
+	"github.com/QuantumNous/new-api/common"
+	"github.com/QuantumNous/new-api/constant"
 	relaycommon "github.com/QuantumNous/new-api/relay/common"
 	"github.com/gin-gonic/gin"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+func TestExternalBillingForwardsOnlyVerifiedRequestID(t *testing.T) {
+	c, _ := gin.CreateTestContext(httptest.NewRecorder())
+	c.Request = httptest.NewRequest(http.MethodPost, "/v1/responses", nil)
+	c.Request.Header.Set("X-Panstar-Request-Id", "untrusted-client-id")
+	c.Set(string(constant.ContextKeyExternalBilling), true)
+	c.Set(common.RequestIdKey, "req_ps_verified123")
+	header := http.Header{}
+	SetupApiRequestHeader(&relaycommon.RelayInfo{}, c, &header)
+	require.Equal(t, "req_ps_verified123", header.Get("X-Panstar-Request-Id"))
+}
 
 func TestNewTaskAPIRequestInheritsClientCancellation(t *testing.T) {
 	recorder := httptest.NewRecorder()

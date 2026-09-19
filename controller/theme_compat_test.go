@@ -44,4 +44,10 @@ func TestGetStatusAdvertisesDefaultDashboard(t *testing.T) {
 	require.NoError(t, common.Unmarshal(response.Body.Bytes(), &payload))
 	assert.True(t, payload.Success)
 	assert.Equal(t, "default", payload.Data["theme"])
+	assert.Equal(t, map[string]any{
+		"upstream_tag": common.PanstarUpstreamTag,
+		"upstream_commit": common.PanstarUpstreamCommit,
+		"panstar_commit": common.PanstarSourceCommit,
+		"dirty": common.PanstarSourceDirty,
+	}, payload.Data["panstar_build"])
 }

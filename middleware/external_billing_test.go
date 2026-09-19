@@ -22,3 +22,16 @@ func TestExternalBillingBearerMatchesOnlyExactDigest(t *testing.T) {
 		}
 	}
 }
+
+func TestPanstarRequestIDRequiresSafeBoundedIdentifier(t *testing.T) {
+	for _, id := range []string{"req_ps_12345678", "7d2a41b8-1024:one"} {
+		if !panstarRequestIDPattern.MatchString(id) {
+			t.Fatalf("valid request ID rejected: %q", id)
+		}
+	}
+	for _, id := range []string{"", "short", "req_ps_\nAuthorization: bearer", "req_ps_汉字"} {
+		if panstarRequestIDPattern.MatchString(id) {
+			t.Fatalf("unsafe request ID accepted: %q", id)
+		}
+	}
+}
