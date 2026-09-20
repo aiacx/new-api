@@ -229,6 +229,33 @@ func TestInitChannelCacheInvalidatesPricingCache(t *testing.T) {
 	}, updated["gemini-3.5-flash"])
 }
 
+func TestInitChannelCacheBuildsMissingGroupBeforeAbilitiesSync(t *testing.T) {
+	resetPricingEndpointTestTables(t)
+
+	channel := &Channel{
+		Id:     303,
+		Type:   constant.ChannelTypeAdvancedCustom,
+		Key:    "key-303",
+		Status: common.ChannelStatusEnabled,
+		Name:   "channel-303",
+		Models: "gpt-6-astra",
+		Group:  "target2-managed",
+	}
+	channel.SetOtherSettings(pricingEndpointAdvancedCustomConfig(dto.AdvancedCustomRoute{
+		IncomingPath:           "/v1/responses",
+		UpstreamPath:           "/v1/responses",
+		Models:                 []string{"gpt-6-astra"},
+		PassThroughBodyEnabled: true,
+	}))
+	require.NoError(t, DB.Create(channel).Error)
+
+	require.NotPanics(t, InitChannelCache)
+	selected, err := GetRandomSatisfiedChannel("target2-managed", "gpt-6-astra", 0, nil)
+	require.NoError(t, err)
+	require.NotNil(t, selected)
+	assert.Equal(t, channel.Id, selected.Id)
+}
+
 func TestInitChannelCacheInvalidatesStartupPricingBuiltBeforeChannelCache(t *testing.T) {
 	resetPricingEndpointTestTables(t)
 
