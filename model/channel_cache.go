@@ -87,7 +87,7 @@ func InitChannelCache() {
 	group2model2channels = newGroup2model2channels
 	//channelsIDM = newChannelId2channel
 	for i, channel := range newChannelId2channel {
-		if channel.ChannelInfo.IsMultiKey {
+		if channel.ChannelInfo.IsMultiKey && channel.KeyVersion == 0 {
 			channel.Keys = channel.GetKeys()
 			if channel.ChannelInfo.MultiKeyMode == constant.MultiKeyModePolling {
 				if oldChannel, ok := channelsIDM[i]; ok {

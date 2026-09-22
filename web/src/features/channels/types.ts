@@ -38,6 +38,11 @@ export const channelSchema = z.object({
   id: z.number(),
   type: z.number(),
   key: z.string(),
+  key_version: z.number().default(0),
+  credential_version: z.number().default(0),
+  key_mask: z.string().default(''),
+  key_updated_time: z.number().default(0),
+  key_validated_time: z.number().default(0),
   openai_organization: z.string().nullish(),
   test_model: z.string().nullish(),
   status: z.number(), // 1: enabled, 0: manual disabled, 2: auto disabled

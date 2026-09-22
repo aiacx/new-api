@@ -33,7 +33,6 @@ import {
   Copy,
   FileText,
   Eraser,
-  Eye,
   RefreshCw,
   Code,
   Route,
@@ -117,7 +116,6 @@ import {
   type ChannelConnectionInfo,
 } from '@/lib/channel-connection-info'
 import { handleServerError } from '@/lib/handle-server-error'
-import { ROLE } from '@/lib/roles'
 import {
   requireServerSuccess,
   createServerError,
@@ -152,7 +150,6 @@ import {
   MODEL_FETCHABLE_TYPES,
   OPENAI_FIELD_PASSTHROUGH_TYPES,
 } from '../../constants'
-import { useChannelKeyDisclosure } from '../../hooks/use-channel-key-disclosure'
 import {
   useChannelModelDiscovery,
   type ChannelModelDiscoveryRequest,
@@ -424,7 +421,6 @@ export function ChannelMutateDrawer({
     ADMIN_PERMISSION_RESOURCES.TASK_PLUGIN,
     ADMIN_PERMISSION_ACTIONS.BIND
   )
-  const canRevealChannelKey = currentUser?.role === ROLE.SUPER_ADMIN
   const [isCodexCredentialRefreshing, setIsCodexCredentialRefreshing] =
     useState(false)
   const initialModelsRef = useRef<string[]>([])
@@ -561,9 +557,6 @@ export function ChannelMutateDrawer({
   })
 
   const { copyToClipboard } = useCopyToClipboard()
-
-  const { channelKey, isChannelKeyLoading, handleRevealKey, verification } =
-    useChannelKeyDisclosure(open, channelId)
 
   // Check if this is a multi-key channel
   const isMultiKeyChannel =
@@ -4319,57 +4312,19 @@ export function ChannelMutateDrawer({
                           )}
                         </span>
                       </FormDescription>
-                      {isEditing && canRevealChannelKey && (
+                      {isEditing && channelData?.data?.key_mask && (
                         <div className='border-border/60 mt-4 flex flex-col gap-3 border-y border-dashed py-4'>
-                          <div className='flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between'>
-                            <div>
-                              <p className='text-sm font-medium'>
-                                {t('Current key')}
-                              </p>
-                              <p className='text-muted-foreground text-xs'>
-                                {t(
-                                  'Verification required to reveal the saved key.'
-                                )}
-                              </p>
-                            </div>
-                            <div className='flex items-center gap-2'>
-                              <Button
-                                type='button'
-                                variant='outline'
-                                size='sm'
-                                onClick={handleRevealKey}
-                                disabled={
-                                  isChannelKeyLoading || verification.isActive
-                                }
-                              >
-                                {isChannelKeyLoading ||
-                                verification.isActive ? (
-                                  <Loader2 className='mr-2 h-4 w-4 animate-spin' />
-                                ) : (
-                                  <Eye className='mr-2 h-4 w-4' />
-                                )}
-                                {t('Reveal key')}
-                              </Button>
-                              <Button
-                                type='button'
-                                variant='ghost'
-                                size='sm'
-                                onClick={async () => {
-                                  if (channelKey) {
-                                    await copyToClipboard(channelKey)
-                                  }
-                                }}
-                                disabled={!channelKey}
-                              >
-                                <Copy className='mr-2 h-4 w-4' />
-                                {t('Copy')}
-                              </Button>
-                            </div>
-                          </div>
+                          <p className='text-sm font-medium'>
+                            {t('Saved key')}
+                          </p>
+                          <p className='text-muted-foreground text-xs'>
+                            {t(
+                              'Write-only credential. Enter a new key above to rotate it.'
+                            )}
+                          </p>
                           <Input
                             readOnly
-                            value={channelKey ?? ''}
-                            placeholder={t('Hidden — verify to reveal')}
+                            value={channelData.data.key_mask}
                             className='font-mono'
                           />
                         </div>
@@ -4999,7 +4954,7 @@ export function ChannelMutateDrawer({
         />
       )}
 
-      <SecureVerificationDialog {...verification.dialogProps} />
+      <SecureVerificationDialog {...channelMutation.verification.dialogProps} />
 
       {/* Missing Models Confirmation Dialog */}
       <MissingModelsConfirmationDialog

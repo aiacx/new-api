@@ -380,6 +380,7 @@ func migrateDB() error {
 
 	err := DB.AutoMigrate(
 		&Channel{},
+		&ChannelKeyRotation{},
 		&Token{},
 		&User{},
 		&UserSession{},
@@ -417,6 +418,13 @@ func migrateDB() error {
 	)
 	if err != nil {
 		return err
+	}
+	if common.ChannelKeyEncryptionRequired() {
+		keyring, err := common.LoadChannelKeyring()
+		if err != nil {
+			return common.ErrChannelKeyMasterUnavailable
+		}
+		keyring.Close()
 	}
 	if err := InitializeUserAuthVersions(); err != nil {
 		return err

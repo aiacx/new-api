@@ -20,6 +20,7 @@ import { useMutation } from '@tanstack/react-query'
 import { useTranslation } from 'react-i18next'
 import { toast } from 'sonner'
 
+import { useSecureVerification } from '@/features/auth/secure-verification'
 import {
   ADMIN_PERMISSION_ACTIONS,
   ADMIN_PERMISSION_RESOURCES,
@@ -29,7 +30,7 @@ import { handleServerError } from '@/lib/handle-server-error'
 import { createServerError } from '@/lib/server-error-message'
 import { useAuthStore } from '@/stores/auth-store'
 
-import { createChannel, updateChannel } from '../api'
+import { createChannel, rotateChannelKey, updateChannel } from '../api'
 import { ERROR_MESSAGES, SUCCESS_MESSAGES } from '../constants'
 import {
   transformFormDataToCreatePayload,
@@ -65,17 +66,31 @@ export function useChannelMutateForm(props: UseChannelMutateFormParams) {
     ADMIN_PERMISSION_RESOURCES.CHANNEL,
     ADMIN_PERMISSION_ACTIONS.SENSITIVE_WRITE
   )
+  const verification = useSecureVerification()
+  const requestVerification = verification.requestVerification
 
-  return useMutation({
+  const mutation = useMutation({
     mutationFn: async (data: ChannelFormValues): Promise<string> => {
       if (props.isEditing && props.currentRow) {
+        const credential = canEditSensitive ? (data.key?.trim() ?? '') : ''
+        const proof = credential
+          ? await requestVerification({
+              scope: 'channel.key.write',
+              context: { channel_id: props.currentRow.id },
+              title: t('Verify to rotate channel key'),
+              description: t(
+                'The saved key is write-only and cannot be revealed later.'
+              ),
+            })
+          : null
+        if (credential && !proof) {
+          throw new Error(t('Channel key rotation was cancelled'))
+        }
         const payload = transformFormDataToUpdatePayload(
           data,
           props.currentRow.id
         )
-        if (!data.key?.trim()) {
-          delete payload.key
-        }
+        delete payload.key
         if (!canEditSensitive) {
           for (const field of SENSITIVE_UPDATE_FIELDS) {
             delete payload[field]
@@ -101,6 +116,21 @@ export function useChannelMutateForm(props: UseChannelMutateFormParams) {
         if (!response.success) {
           throw createServerError(response, t(ERROR_MESSAGES.UPDATE_FAILED))
         }
+        if (credential && proof) {
+          const idempotencyKey =
+            typeof globalThis.crypto?.randomUUID === 'function'
+              ? globalThis.crypto.randomUUID()
+              : `channel-key-${Date.now()}-${Math.random().toString(36).slice(2)}`
+          const rotated = await rotateChannelKey(
+            props.currentRow.id,
+            credential,
+            proof.proof_token,
+            idempotencyKey
+          )
+          if (!rotated.success) {
+            throw createServerError(rotated, t(ERROR_MESSAGES.UPDATE_FAILED))
+          }
+        }
         return SUCCESS_MESSAGES.UPDATED
       }
 
@@ -119,4 +149,5 @@ export function useChannelMutateForm(props: UseChannelMutateFormParams) {
       handleServerError(error, t(ERROR_MESSAGES.CREATE_FAILED))
     },
   })
+  return { ...mutation, verification }
 }

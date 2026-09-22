@@ -88,6 +88,11 @@ var channelReadOnlyFields = map[string]struct{}{
 	"balance":              {},
 	"balance_updated_time": {},
 	"used_quota":           {},
+	"key_version":          {},
+	"credential_version":   {},
+	"key_mask":             {},
+	"key_updated_time":     {},
+	"key_validated_time":   {},
 }
 
 func clearChannelReadOnlyFields(channel *PatchChannel, requestData map[string]any) {
@@ -108,6 +113,21 @@ func clearChannelReadOnlyFields(channel *PatchChannel, requestData map[string]an
 	}
 	if _, ok := requestData["used_quota"]; ok {
 		channel.UsedQuota = 0
+	}
+	if _, ok := requestData["key_version"]; ok {
+		channel.KeyVersion = 0
+	}
+	if _, ok := requestData["credential_version"]; ok {
+		channel.CredentialVersion = 0
+	}
+	if _, ok := requestData["key_mask"]; ok {
+		channel.KeyMask = ""
+	}
+	if _, ok := requestData["key_updated_time"]; ok {
+		channel.KeyUpdatedTime = 0
+	}
+	if _, ok := requestData["key_validated_time"]; ok {
+		channel.KeyValidatedTime = 0
 	}
 }
 

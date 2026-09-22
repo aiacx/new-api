@@ -12,8 +12,8 @@ import (
 	"github.com/gin-gonic/gin"
 )
 
-// SecureVerificationRequired protects channel key disclosure. Other sensitive
-// operations validate their narrower proof scopes in their controller.
+// SecureVerificationRequired protects write-only channel credential metadata.
+// Other sensitive operations validate their narrower proof scopes in their controller.
 func SecureVerificationRequired() gin.HandlerFunc {
 	return func(c *gin.Context) {
 		channelID, err := strconv.Atoi(c.Param("id"))

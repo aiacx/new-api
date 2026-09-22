@@ -31,7 +31,7 @@ COPY . .
 COPY --from=builder /build/web/dist ./web/dist
 RUN go build -ldflags "-s -w -X github.com/QuantumNous/new-api/common.Version=${UPSTREAM_TAG} -X github.com/QuantumNous/new-api/common.PanstarSourceCommit=${BUILD_REVISION} -X github.com/QuantumNous/new-api/common.PanstarUpstreamTag=${UPSTREAM_TAG} -X github.com/QuantumNous/new-api/common.PanstarUpstreamCommit=${UPSTREAM_COMMIT} -X github.com/QuantumNous/new-api/common.PanstarSourceDirty=${BUILD_DIRTY}" -o new-api
 
-FROM debian:bookworm-slim@sha256:3783cc01769c7b2b1b83a5c5ad96c815348e28ed7da68e2e3687004faa906251
+FROM alpine:3.24.2@sha256:294b683cb724975bec92580e1e685676bd4b50bda910ddb8c51d4cabeaec77e6
 
 ARG BUILD_REVISION=unknown
 ARG UPSTREAM_TAG=unknown
@@ -44,13 +44,9 @@ LABEL org.opencontainers.image.source="https://github.com/aiacx/new-api" \
       io.panstar.new-api.dirty="${BUILD_DIRTY}" \
       org.opencontainers.image.licenses="AGPL-3.0-only"
 
-RUN apt-get update \
-    && apt-get upgrade -y --no-install-recommends \
-    && apt-get install -y --no-install-recommends ca-certificates tzdata libasan8 wget \
-    && rm -rf /var/lib/apt/lists/* \
-    && update-ca-certificates \
-    && groupadd --gid 10001 newapi \
-    && useradd --uid 10001 --gid 10001 --no-create-home --shell /usr/sbin/nologin newapi \
+RUN apk add --no-cache ca-certificates tzdata wget \
+    && addgroup -g 10001 -S newapi \
+    && adduser -u 10001 -S -D -H -G newapi newapi \
     && mkdir -p /data /app/logs \
     && chown -R 10001:10001 /data /app
 

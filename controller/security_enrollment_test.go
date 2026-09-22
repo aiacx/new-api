@@ -865,14 +865,15 @@ func TestSecurityEnrollmentPasskeyProofProtectsChannelKeyRead(t *testing.T) {
 	router := gin.New()
 	router.POST("/api/channel/:id/key", middleware.RootAuth(), middleware.SecureVerificationRequired(), GetChannelKey)
 	for _, test := range []struct {
-		name, path, proof, code, key string
-		status                       int
+		name, path, proof, code string
+		configured              bool
+		status                  int
 	}{
-		{"login token only", "/api/channel/123/key", "", "SECURITY_PROOF_REQUIRED", "", http.StatusForbidden},
-		{"access token as proof", "/api/channel/123/key", rotation.AccessToken, "SECURITY_PROOF_INVALID", "", http.StatusForbidden},
-		{"other channel", "/api/channel/456/key", proof.ProofToken, "SECURITY_PROOF_CONTEXT_MISMATCH", "", http.StatusForbidden},
-		{"authorized channel", "/api/channel/123/key", proof.ProofToken, "", "first-channel-secret", http.StatusOK},
-		{"replay", "/api/channel/123/key", proof.ProofToken, "SECURITY_PROOF_CONSUMED", "", http.StatusForbidden},
+		{"login token only", "/api/channel/123/key", "", "SECURITY_PROOF_REQUIRED", false, http.StatusForbidden},
+		{"access token as proof", "/api/channel/123/key", rotation.AccessToken, "SECURITY_PROOF_INVALID", false, http.StatusForbidden},
+		{"other channel", "/api/channel/456/key", proof.ProofToken, "SECURITY_PROOF_CONTEXT_MISMATCH", false, http.StatusForbidden},
+		{"authorized channel", "/api/channel/123/key", proof.ProofToken, "", true, http.StatusOK},
+		{"replay", "/api/channel/123/key", proof.ProofToken, "SECURITY_PROOF_CONSUMED", false, http.StatusForbidden},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			request := httptest.NewRequest("POST", test.path, nil)
@@ -884,15 +885,15 @@ func TestSecurityEnrollmentPasskeyProofProtectsChannelKeyRead(t *testing.T) {
 			var response securityEnrollmentResponse
 			require.NoError(t, common.Unmarshal(result.Body.Bytes(), &response))
 			assert.Equal(t, test.code, response.Code)
-			if test.key != "" {
-				assert.Contains(t, string(response.Data), test.key)
-			} else {
-				assert.NotContains(t, result.Body.String(), "channel-secret")
+			assert.NotContains(t, result.Body.String(), "channel-secret")
+			if test.configured {
+				assert.Contains(t, string(response.Data), `"configured":true`)
+				assert.NotContains(t, string(response.Data), `"key":`)
 			}
 		})
 	}
 	var logs []model.AuditLog
-	require.NoError(t, model.LOG_DB.Where("action = ?", "channel.key_view").Find(&logs).Error)
+	require.NoError(t, model.LOG_DB.Where("action = ?", "channel.key_metadata_read").Find(&logs).Error)
 	require.Len(t, logs, 1)
 	encodedLogs, err := common.Marshal(logs)
 	require.NoError(t, err)

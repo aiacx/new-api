@@ -189,6 +189,39 @@ export async function updateChannel(
   return res.data
 }
 
+export type ChannelCredentialMetadata = {
+  configured: boolean
+  credential_version: number
+  key_version: number
+  key_mask: string
+  updated_time: number
+  validated_time?: number
+  replayed?: boolean
+}
+
+export async function rotateChannelKey(
+  id: number,
+  key: string,
+  proofToken: string,
+  idempotencyKey: string
+): Promise<{
+  success: boolean
+  message?: string
+  data?: ChannelCredentialMetadata
+}> {
+  const res = await api.post(
+    `/api/channel/${id}/key/rotate`,
+    { key },
+    channelActionConfig({
+      headers: {
+        'X-Security-Proof': proofToken,
+        'Idempotency-Key': idempotencyKey,
+      },
+    })
+  )
+  return res.data
+}
+
 /**
  * Update channel enabled/disabled status.
  */
@@ -341,13 +374,17 @@ export async function deleteDisabledChannels(): Promise<{
 }
 
 /**
- * Get channel key (requires 2FA verification)
+ * Get write-only channel credential metadata after secondary verification.
  */
-export async function getChannelKey(
+export async function getChannelCredentialMetadata(
   id: number,
   proofToken: string,
   signal?: AbortSignal
-): Promise<{ success: boolean; message?: string; data?: { key: string } }> {
+): Promise<{
+  success: boolean
+  message?: string
+  data?: ChannelCredentialMetadata
+}> {
   const res = await api.post(
     `/api/channel/${id}/key`,
     undefined,

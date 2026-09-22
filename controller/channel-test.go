@@ -447,14 +447,11 @@ func testChannel(ctx context.Context, channel *model.Channel, testUserID int, te
 		if httpResp.StatusCode != http.StatusOK {
 			err := service.RelayErrorHandler(c.Request.Context(), httpResp, true)
 			common.SysError(fmt.Sprintf(
-				"channel test bad response: channel_id=%d name=%s type=%d model=%s endpoint_type=%s status=%d err=%v",
+				"channel test bad response: channel_id=%d type=%d endpoint_type=%s status=%d",
 				channel.Id,
-				channel.Name,
 				channel.Type,
-				testModel,
 				endpointType,
 				httpResp.StatusCode,
-				err,
 			))
 			return testResult{
 				context:     c,
@@ -471,7 +468,18 @@ func testChannel(ctx context.Context, channel *model.Channel, testUserID int, te
 			newAPIError: respErr,
 		}
 	}
+	responsesCanary := info.RelayMode == relayconstant.RelayModeResponses
+	if responsesCanary && isStream && usageA == nil {
+		usageErr := errors.New("responses stream test did not return final usage")
+		return testResult{
+			context: c, localErr: usageErr,
+			newAPIError: types.NewOpenAIError(usageErr, types.ErrorCodeBadResponseBody, http.StatusInternalServerError),
+		}
+	}
 	usage, usageErr := coerceTestUsage(usageA, isStream, info.GetEstimatePromptTokens())
+	if usageErr == nil && responsesCanary && isStream && usage == nil {
+		usageErr = errors.New("responses stream test did not return final usage")
+	}
 	if usageErr != nil {
 		return testResult{
 			context:     c,
@@ -488,7 +496,7 @@ func testChannel(ctx context.Context, channel *model.Channel, testUserID int, te
 			newAPIError: types.NewOpenAIError(err, types.ErrorCodeReadResponseBodyFailed, http.StatusInternalServerError),
 		}
 	}
-	if bodyErr := validateTestResponseBody(respBody, isStream); bodyErr != nil {
+	if bodyErr := validateTestResponseBody(respBody, isStream, responsesCanary); bodyErr != nil {
 		return testResult{
 			context:     c,
 			localErr:    bodyErr,
@@ -515,7 +523,8 @@ func testChannel(ctx context.Context, channel *model.Channel, testUserID int, te
 		Group:            info.UsingGroup,
 		Other:            other,
 	})
-	common.SysLog(fmt.Sprintf("testing channel #%d, response: \n%s", channel.Id, string(respBody)))
+	common.SysLog(fmt.Sprintf("channel test succeeded: channel_id=%d response_bytes=%d stream=%t",
+		channel.Id, len(respBody), info.IsStream))
 	return testResult{
 		context:     c,
 		localErr:    nil,
@@ -633,12 +642,14 @@ func detectErrorFromTestResponseBody(respBody []byte) error {
 	return nil
 }
 
-func validateStreamTestResponseBody(respBody []byte) error {
+func validateStreamTestResponseBody(respBody []byte, requireResponsesCompleted bool) error {
 	b := bytes.TrimSpace(respBody)
 	if len(b) == 0 {
 		return errors.New("stream response body is empty")
 	}
 
+	foundEvent := false
+	foundResponsesCompleted := false
 	for line := range bytes.SplitSeq(b, []byte{'\n'}) {
 		line = bytes.TrimSpace(line)
 		if len(line) == 0 || !bytes.HasPrefix(line, []byte("data:")) {
@@ -649,18 +660,26 @@ func validateStreamTestResponseBody(respBody []byte) error {
 			continue
 		}
 
-		return nil
+		foundEvent = true
+		if gjson.GetBytes(payload, "type").String() == "response.completed" {
+			foundResponsesCompleted = true
+		}
 	}
-
-	return errors.New("stream response body does not contain a valid stream event")
+	if !foundEvent {
+		return errors.New("stream response body does not contain a valid stream event")
+	}
+	if requireResponsesCompleted && !foundResponsesCompleted {
+		return errors.New("responses stream did not reach response.completed")
+	}
+	return nil
 }
 
-func validateTestResponseBody(respBody []byte, isStream bool) error {
+func validateTestResponseBody(respBody []byte, isStream bool, requireResponsesCompleted bool) error {
 	if bodyErr := detectErrorFromTestResponseBody(respBody); bodyErr != nil {
 		return bodyErr
 	}
 	if isStream {
-		return validateStreamTestResponseBody(respBody)
+		return validateStreamTestResponseBody(respBody, requireResponsesCompleted)
 	}
 	return nil
 }
@@ -878,7 +897,7 @@ func TestChannel(c *gin.Context) {
 	if result.localErr != nil {
 		resp := gin.H{
 			"success": false,
-			"message": result.localErr.Error(),
+			"message": "Channel inference canary failed",
 			"time":    0.0,
 		}
 		if result.newAPIError != nil {
@@ -889,12 +908,15 @@ func TestChannel(c *gin.Context) {
 	}
 	tok := time.Now()
 	milliseconds := tok.Sub(tik).Milliseconds()
-	go channel.UpdateResponseTime(milliseconds)
+	go func() {
+		channel.UpdateResponseTime(milliseconds)
+		channel.UpdateCredentialValidationTime(common.GetTimestamp())
+	}()
 	consumedTime := float64(milliseconds) / 1000.0
 	if result.newAPIError != nil {
 		c.JSON(http.StatusOK, gin.H{
 			"success":    false,
-			"message":    result.newAPIError.Error(),
+			"message":    "Channel inference canary failed",
 			"time":       consumedTime,
 			"error_code": result.newAPIError.GetErrorCode(),
 		})

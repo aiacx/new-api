@@ -13,6 +13,7 @@ import (
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/constant"
 	"github.com/QuantumNous/new-api/i18n"
+	"github.com/QuantumNous/new-api/middleware"
 	"github.com/QuantumNous/new-api/model"
 	"github.com/QuantumNous/new-api/pkg/jsplugin"
 	relaychannel "github.com/QuantumNous/new-api/relay/channel"
@@ -67,6 +68,7 @@ func parseStatusFilter(statusParam string) int {
 }
 
 func clearChannelInfo(channel *model.Channel) {
+	channel.Key = ""
 	if channel.ChannelInfo.IsMultiKey {
 		channel.ChannelInfo.MultiKeyDisabledReason = nil
 		channel.ChannelInfo.MultiKeyDisabledTime = nil
@@ -501,8 +503,8 @@ func GetChannel(c *gin.Context) {
 	return
 }
 
-// GetChannelKey 获取渠道密钥（需要通过安全验证中间件）
-// 此函数依赖 SecureVerificationRequired 中间件，确保用户已通过安全验证
+// GetChannelKey returns only non-secret credential metadata. Stored channel
+// credentials are write-only and can never be recovered through the admin API.
 func GetChannelKey(c *gin.Context) {
 	channelId, err := strconv.Atoi(c.Param("id"))
 	if err != nil || channelId <= 0 {
@@ -510,8 +512,7 @@ func GetChannelKey(c *gin.Context) {
 		return
 	}
 
-	// 获取渠道信息（包含密钥）
-	channel, err := model.GetChannelById(channelId, true)
+	metadata, err := model.GetChannelCredentialMetadata(channelId)
 	if errors.Is(err, gorm.ErrRecordNotFound) {
 		common.ApiErrorI18n(c, i18n.MsgChannelNotExists)
 		return
@@ -521,20 +522,67 @@ func GetChannelKey(c *gin.Context) {
 		return
 	}
 
-	// 记录操作审计日志（高危：查看渠道密钥）
-	recordManageAudit(c, "channel.key_view", map[string]any{
+	recordManageAudit(c, "channel.key_metadata_read", map[string]any{
 		"id":   channelId,
-		"name": channel.Name,
+		"name": metadata.Name,
 	})
 
-	// 返回渠道密钥
 	c.JSON(http.StatusOK, gin.H{
 		"success": true,
-		"message": "获取成功",
+		"message": "",
 		"data": map[string]any{
-			"key": channel.Key,
+			"configured":         metadata.Configured,
+			"key_version":        metadata.MasterKeyVersion,
+			"credential_version": metadata.CredentialVersion,
+			"key_mask":           metadata.KeyMask,
+			"updated_time":       metadata.UpdatedTime,
+			"validated_time":     metadata.ValidatedTime,
 		},
 	})
+}
+
+type rotateChannelKeyRequest struct {
+	Key string `json:"key"`
+}
+
+func RotateChannelKey(c *gin.Context) {
+	channelID, err := strconv.Atoi(c.Param("id"))
+	if err != nil || channelID <= 0 {
+		common.ApiErrorMsg(c, "渠道ID格式错误")
+		return
+	}
+	context, err := common.Marshal(service.ChannelKeyReadContext{ChannelID: channelID})
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"success": false, "message": "密钥轮换失败"})
+		return
+	}
+	if middleware.RequireSecurityProof(c, service.VerificationOperation{
+		Scope: service.VerificationScopeChannelKeyWrite, Context: context,
+	}) == nil {
+		return
+	}
+	var request rotateChannelKeyRequest
+	if err := c.ShouldBindJSON(&request); err != nil || strings.TrimSpace(request.Key) == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"success": false, "message": "密钥不能为空"})
+		return
+	}
+	rotation, replayed, err := model.RotateChannelKey(channelID, request.Key,
+		strings.TrimSpace(c.GetHeader("Idempotency-Key")))
+	request.Key = ""
+	if err != nil {
+		common.ApiError(c, err)
+		return
+	}
+	model.InitChannelCache()
+	recordManageAudit(c, "channel.key_rotate", map[string]any{
+		"id": channelID, "credential_version": rotation.CredentialVersion,
+		"key_version": rotation.MasterKeyVersion, "replayed": replayed,
+	})
+	c.JSON(http.StatusOK, gin.H{"success": true, "message": "", "data": gin.H{
+		"configured": true, "credential_version": rotation.CredentialVersion,
+		"key_version": rotation.MasterKeyVersion, "key_mask": rotation.KeyMask,
+		"updated_time": rotation.CreatedTime, "replayed": replayed,
+	}})
 }
 
 // validateChannel 通用的渠道校验函数
@@ -583,7 +631,8 @@ func validateChannel(channel *model.Channel, isAdd bool) error {
 
 	// 如果是添加操作，检查 channel 和 key 是否为空
 	if isAdd {
-		if channel.Key == "" {
+		if channel.Key == "" && !(common.ChannelKeyEncryptionRequired() &&
+			channel.Status != common.ChannelStatusEnabled) {
 			return fmt.Errorf("channel cannot be empty")
 		}
 
@@ -712,6 +761,12 @@ func AddChannel(c *gin.Context) {
 		common.ApiError(c, err)
 		return
 	}
+	if common.ChannelKeyEncryptionRequired() && addChannelRequest.Channel != nil &&
+		strings.TrimSpace(addChannelRequest.Channel.Key) != "" {
+		c.JSON(http.StatusBadRequest, gin.H{"success": false,
+			"message": "Use the protected channel credential rotation action"})
+		return
+	}
 
 	if addChannelRequest.Channel != nil && addChannelRequest.Channel.Type == constant.ChannelTypeTaskPlugin &&
 		!authz.Can(c.GetInt("id"), c.GetInt("role"), authz.TaskPluginBind) {
@@ -790,7 +845,8 @@ func AddChannel(c *gin.Context) {
 
 	channels := make([]model.Channel, 0, len(keys))
 	for _, key := range keys {
-		if key == "" {
+		if key == "" && !(common.ChannelKeyEncryptionRequired() && len(keys) == 1 &&
+			addChannelRequest.Channel.Status != common.ChannelStatusEnabled) {
 			continue
 		}
 		localChannel := addChannelRequest.Channel
@@ -1086,6 +1142,13 @@ func UpdateChannel(c *gin.Context) {
 	if err := common.Unmarshal(rawBody, &requestData); err != nil {
 		common.ApiError(c, err)
 		return
+	}
+	if common.ChannelKeyEncryptionRequired() {
+		if _, supplied := requestData["key"]; supplied && strings.TrimSpace(channel.Key) != "" {
+			c.JSON(http.StatusBadRequest, gin.H{"success": false,
+				"message": "Use the protected channel credential rotation action"})
+			return
+		}
 	}
 	if _, ok := requestData["status"]; ok {
 		common.ApiErrorI18n(c, i18n.MsgInvalidParams)
@@ -1576,6 +1639,11 @@ func CopyChannel(c *gin.Context) {
 	if err != nil {
 		common.SysError("failed to get channel by id: " + err.Error())
 		c.JSON(http.StatusOK, gin.H{"success": false, "message": "获取渠道信息失败，请稍后重试"})
+		return
+	}
+	if origin.KeyVersion > 0 {
+		c.JSON(http.StatusConflict, gin.H{"success": false,
+			"message": "Encrypted channel credentials cannot be copied"})
 		return
 	}
 	if origin.Type == constant.ChannelTypeTaskPlugin &&

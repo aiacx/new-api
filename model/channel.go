@@ -1,7 +1,9 @@
 package model
 
 import (
+	cryptorand "crypto/rand"
 	"database/sql/driver"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -24,6 +26,14 @@ type Channel struct {
 	Id                 int     `json:"id"`
 	Type               int     `json:"type" gorm:"default:0"`
 	Key                string  `json:"key" gorm:"not null"`
+	KeyCiphertext      string  `json:"-"`
+	KeyNonce           string  `json:"-" gorm:"type:varchar(64)"`
+	KeyCipherID        string  `json:"-" gorm:"type:char(32);index"`
+	KeyVersion         int     `json:"key_version" gorm:"default:0"`
+	CredentialVersion  int     `json:"credential_version" gorm:"default:0"`
+	KeyMask            string  `json:"key_mask" gorm:"type:varchar(32);default:''"`
+	KeyUpdatedTime     int64   `json:"key_updated_time" gorm:"bigint;default:0"`
+	KeyValidatedTime   int64   `json:"key_validated_time" gorm:"bigint;default:0"`
 	OpenAIOrganization *string `json:"openai_organization"`
 	TestModel          *string `json:"test_model"`
 	Status             int     `json:"status" gorm:"default:1"`
@@ -180,13 +190,14 @@ func (c *ChannelInfo) Scan(value any) error {
 }
 
 func (channel *Channel) GetKeys() []string {
-	if channel.Key == "" {
+	key, err := channel.ResolveKey()
+	if err != nil || key == "" {
 		return []string{}
 	}
 	if len(channel.Keys) > 0 {
 		return channel.Keys
 	}
-	trimmed := strings.TrimSpace(channel.Key)
+	trimmed := strings.TrimSpace(key)
 	// If the key starts with '[', try to parse it as a JSON array (e.g., for Vertex AI scenarios)
 	if strings.HasPrefix(trimmed, "[") {
 		var arr []json.RawMessage
@@ -199,14 +210,89 @@ func (channel *Channel) GetKeys() []string {
 		}
 	}
 	// Otherwise, fall back to splitting by newline
-	keys := strings.Split(strings.Trim(channel.Key, "\n"), "\n")
+	keys := strings.Split(strings.Trim(key, "\n"), "\n")
 	return keys
+}
+
+func (channel *Channel) KeyConfigured() bool {
+	return channel != nil && (channel.Key != "" || channel.KeyVersion > 0)
+}
+
+func (channel *Channel) ResolveKey() (string, error) {
+	if channel == nil {
+		return "", common.ErrChannelKeyCiphertextInvalid
+	}
+	if channel.KeyVersion == 0 {
+		return channel.Key, nil
+	}
+	if channel.Key != "" || channel.KeyCiphertext == "" || channel.KeyNonce == "" ||
+		channel.KeyCipherID == "" || channel.KeyMask == "" {
+		return "", common.ErrChannelKeyCiphertextInvalid
+	}
+	keyring, err := common.LoadChannelKeyring()
+	if err != nil {
+		return "", err
+	}
+	defer keyring.Close()
+	return keyring.Decrypt(common.ChannelKeyEnvelope{
+		Ciphertext: channel.KeyCiphertext,
+		Nonce:      channel.KeyNonce,
+		Version:    channel.KeyVersion,
+		Mask:       channel.KeyMask,
+	}, channel.KeyCipherID)
+}
+
+func (channel *Channel) EncryptKeyForStorage(required bool) error {
+	if channel == nil || channel.Key == "" {
+		return nil
+	}
+	keyring, err := common.LoadChannelKeyring()
+	if err != nil {
+		if required || common.ChannelKeyEncryptionRequired() {
+			return common.ErrChannelKeyMasterUnavailable
+		}
+		return nil
+	}
+	defer keyring.Close()
+	channel.KeyCipherID = strings.TrimSpace(channel.KeyCipherID)
+	if channel.KeyCipherID == "" {
+		randomID := make([]byte, 16)
+		if _, err := cryptorand.Read(randomID); err != nil {
+			return common.ErrChannelKeyMasterUnavailable
+		}
+		channel.KeyCipherID = hex.EncodeToString(randomID)
+		for index := range randomID {
+			randomID[index] = 0
+		}
+	}
+	envelope, err := keyring.Encrypt(channel.Key, channel.KeyCipherID)
+	if err != nil {
+		return err
+	}
+	channel.KeyCiphertext = envelope.Ciphertext
+	channel.KeyNonce = envelope.Nonce
+	channel.KeyVersion = envelope.Version
+	if channel.CredentialVersion < 1 {
+		channel.CredentialVersion = 1
+	}
+	channel.KeyMask = envelope.Mask
+	channel.KeyUpdatedTime = common.GetTimestamp()
+	channel.Key = ""
+	channel.Keys = nil
+	return nil
 }
 
 func (channel *Channel) GetNextEnabledKey() (string, int, *types.NewAPIError) {
 	// If not in multi-key mode, return the original key string directly.
 	if !channel.ChannelInfo.IsMultiKey {
-		return channel.Key, 0, nil
+		if channel.KeyVersion == 0 {
+			return channel.Key, 0, nil
+		}
+		key, err := channel.ResolveKey()
+		if err != nil || key == "" {
+			return "", 0, types.NewError(errors.New("channel credential unavailable"), types.ErrorCodeChannelNoAvailableKey)
+		}
+		return key, 0, nil
 	}
 
 	// Obtain all keys (split by \n)
@@ -453,6 +539,11 @@ func BatchInsertChannels(channels []Channel) error {
 	if len(channels) == 0 {
 		return nil
 	}
+	for index := range channels {
+		if err := channels[index].EncryptKeyForStorage(false); err != nil {
+			return err
+		}
+	}
 	tx := DB.Begin()
 	if tx.Error != nil {
 		return tx.Error
@@ -547,6 +638,9 @@ func (channel *Channel) GetStatusCodeMapping() string {
 
 func (channel *Channel) Insert() error {
 	var err error
+	if err = channel.EncryptKeyForStorage(false); err != nil {
+		return err
+	}
 	err = DB.Create(channel).Error
 	if err != nil {
 		return err
@@ -556,6 +650,7 @@ func (channel *Channel) Insert() error {
 }
 
 func (channel *Channel) Update() error {
+	keyChanged := channel.Key != ""
 	// If this is a multi-key channel, recalculate MultiKeySize based on the current key list to avoid inconsistency after editing keys
 	if channel.ChannelInfo.IsMultiKey {
 		var keyStr string
@@ -564,7 +659,7 @@ func (channel *Channel) Update() error {
 		} else {
 			// If key is not provided, read the existing key from the database
 			if existing, err := GetChannelById(channel.Id, true); err == nil {
-				keyStr = existing.Key
+				keyStr, _ = existing.ResolveKey()
 			}
 		}
 		// Parse the key list (supports newline separation or JSON array)
@@ -594,10 +689,29 @@ func (channel *Channel) Update() error {
 			}
 		}
 	}
+	if err := channel.EncryptKeyForStorage(false); err != nil {
+		return err
+	}
+	encryptedKeyChanged := keyChanged && channel.KeyVersion > 0
 	var err error
 	err = DB.Model(channel).Updates(channel).Error
 	if err != nil {
 		return err
+	}
+	if encryptedKeyChanged {
+		err = DB.Model(&Channel{}).Where("id = ?", channel.Id).Updates(map[string]any{
+			"key":                "",
+			"key_ciphertext":     channel.KeyCiphertext,
+			"key_nonce":          channel.KeyNonce,
+			"key_cipher_id":      channel.KeyCipherID,
+			"key_version":        channel.KeyVersion,
+			"credential_version": channel.CredentialVersion,
+			"key_mask":           channel.KeyMask,
+			"key_updated_time":   channel.KeyUpdatedTime,
+		}).Error
+		if err != nil {
+			return err
+		}
 	}
 	DB.Model(channel).First(channel, "id = ?", channel.Id)
 	err = channel.UpdateAbilities(nil)
@@ -611,6 +725,16 @@ func (channel *Channel) UpdateResponseTime(responseTime int64) {
 	}).Error
 	if err != nil {
 		common.SysLog(fmt.Sprintf("failed to update response time: channel_id=%d, error=%v", channel.Id, err))
+	}
+}
+
+func (channel *Channel) UpdateCredentialValidationTime(validatedAt int64) {
+	if channel == nil || channel.Id < 1 || channel.KeyVersion < 1 || validatedAt < 1 {
+		return
+	}
+	if err := DB.Model(&Channel{}).Where("id = ? AND key_version > 0", channel.Id).
+		Update("key_validated_time", validatedAt).Error; err != nil {
+		common.SysLog(fmt.Sprintf("failed to update channel credential validation time: channel_id=%d", channel.Id))
 	}
 }
 
