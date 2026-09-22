@@ -13,8 +13,10 @@ import (
 
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/constant"
+	"github.com/QuantumNous/new-api/dto"
 	"github.com/QuantumNous/new-api/i18n"
 	"github.com/QuantumNous/new-api/model"
+	"github.com/QuantumNous/new-api/service"
 	"github.com/gin-gonic/gin"
 )
 
@@ -76,6 +78,7 @@ func authenticateExternalBillingService(c *gin.Context, bearer string) bool {
 			return true
 		}
 		c.Set("external_billing_managed_channel_id", channelID)
+		pinManagedExternalBillingChannel(c, channelID)
 	}
 	requestID := c.GetHeader("X-Panstar-Request-Id")
 	if !panstarRequestIDPattern.MatchString(requestID) {
@@ -101,6 +104,15 @@ func authenticateExternalBillingService(c *gin.Context, bearer string) bool {
 	c.Request = c.Request.WithContext(context.WithValue(requestContext,
 		string(constant.ContextKeyExternalBilling), true))
 	return true
+}
+
+func pinManagedExternalBillingChannel(c *gin.Context, channelID int) {
+	service.GetChannelConstraints(c).AddPin(dto.ChannelPin{
+		ChannelId: channelID,
+		Source:    dto.PinSourceToken,
+		Rank:      dto.PinRankToken,
+		RetryMode: dto.PinRetrySingleAttempt,
+	})
 }
 
 func validManagedBillingGroup(group string) bool {

@@ -227,6 +227,24 @@ func TestSecurityEnrollmentAccessTokenMethodPolicy(t *testing.T) {
 	}
 }
 
+func TestChannelKeyVerificationFallsBackToPasswordForRoot(t *testing.T) {
+	user, identity := setupSecurityEnrollmentTest(t)
+	require.NoError(t, model.DB.Model(user).Update("role", common.RoleRootUser).Error)
+	require.NoError(t, model.PublishUserAuthCache(user.Id))
+
+	for _, scope := range []string{
+		service.VerificationScopeChannelKeyRead,
+		service.VerificationScopeChannelKeyWrite,
+	} {
+		requirements, err := service.GetVerificationRequirements(identity, scope)
+		require.NoError(t, err)
+		require.Equal(t, scope, requirements.Scope)
+		require.Equal(t, []service.VerificationMethodOption{{
+			Method: service.VerificationMethodPassword, Available: true,
+		}}, requirements.Methods)
+	}
+}
+
 func TestSecurityEnrollmentAccessTokenLifecycleConsumesProofs(t *testing.T) {
 	user, identity := setupSecurityEnrollmentTest(t)
 	require.NoError(t, model.UpdateUserAccessToken(user.Id, "previous-token"))

@@ -3,7 +3,14 @@ package middleware
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"net/http/httptest"
 	"testing"
+
+	"github.com/QuantumNous/new-api/dto"
+	"github.com/QuantumNous/new-api/service"
+	"github.com/gin-gonic/gin"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func TestExternalBillingBearerMatchesOnlyExactDigest(t *testing.T) {
@@ -21,6 +28,18 @@ func TestExternalBillingBearerMatchesOnlyExactDigest(t *testing.T) {
 			t.Fatalf("invalid digest %q matched", invalid)
 		}
 	}
+}
+
+func TestManagedBillingPinsConfiguredChannelBeforeDistribution(t *testing.T) {
+	c, _ := gin.CreateTestContext(httptest.NewRecorder())
+	pinManagedExternalBillingChannel(c, 91)
+
+	pin, found, overridden := service.GetChannelConstraints(c).ResolvedPin()
+	require.True(t, found)
+	assert.Equal(t, 91, pin.ChannelId)
+	assert.Equal(t, dto.PinSourceToken, pin.Source)
+	assert.Equal(t, dto.PinRetrySingleAttempt, pin.RetryMode)
+	assert.Empty(t, overridden)
 }
 
 func TestPanstarRequestIDRequiresSafeBoundedIdentifier(t *testing.T) {
