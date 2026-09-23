@@ -25,13 +25,14 @@ const testPanstarStateOwner = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
 func TestPanstarResponseStateIsDefaultOff(t *testing.T) {
 	t.Setenv("PANSTAR_RESPONSES_STATE_ENABLED", "false")
 	body := []byte(`{"model":"gpt-test","input":"private","store":true}`)
-	context := panstarResponseTestContext(t, body, "")
+	context := panstarResponseTestContext(t, body, testPanstarStateOwner)
 	request := &dto.OpenAIResponsesRequest{
 		Model: "gpt-test", Input: json.RawMessage(`"private"`), Store: json.RawMessage(`true`),
 	}
 	require.Nil(t, PreparePanstarResponseState(context, request))
 	require.JSONEq(t, `true`, string(request.Store))
 	require.Nil(t, panstarResponseStateContextFrom(context))
+	require.Empty(t, context.Request.Header.Get(PanstarStateOwnerHeader))
 }
 
 func TestPanstarResponseStateReplaysEncryptedOwnedContext(t *testing.T) {
@@ -43,6 +44,7 @@ func TestPanstarResponseStateReplaysEncryptedOwnedContext(t *testing.T) {
 		Model: "gpt-test", Input: json.RawMessage(`"private first"`), Store: json.RawMessage(`true`),
 	}
 	require.Nil(t, PreparePanstarResponseState(firstContext, firstRequest))
+	require.Empty(t, firstContext.Request.Header.Get(PanstarStateOwnerHeader))
 	require.JSONEq(t, `[{"role":"user","content":"private first"}]`, string(firstRequest.Input))
 	require.JSONEq(t, `false`, string(firstRequest.Store))
 	patched := bodyStorageBytes(t, firstContext)

@@ -54,6 +54,11 @@ func PanstarResponsesStateEnabled() bool {
 }
 
 func PreparePanstarResponseState(c *gin.Context, request any) *types.NewAPIError {
+	owner := ""
+	if c != nil && c.Request != nil {
+		owner = strings.ToLower(strings.TrimSpace(c.GetHeader(PanstarStateOwnerHeader)))
+		c.Request.Header.Del(PanstarStateOwnerHeader)
+	}
 	if !PanstarResponsesStateEnabled() {
 		return nil
 	}
@@ -74,7 +79,6 @@ func PreparePanstarResponseState(c *gin.Context, request any) *types.NewAPIError
 	if !store && previousID == "" {
 		return nil
 	}
-	owner := strings.ToLower(strings.TrimSpace(c.GetHeader(PanstarStateOwnerHeader)))
 	if !panstarStateOwnerPattern.MatchString(owner) {
 		return types.NewErrorWithStatusCode(errors.New("response state owner is invalid"),
 			types.ErrorCodeAccessDenied, http.StatusForbidden, types.ErrOptionWithSkipRetry())

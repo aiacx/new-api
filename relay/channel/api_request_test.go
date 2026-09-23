@@ -4,6 +4,7 @@ import (
 	"context"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/QuantumNous/new-api/common"
@@ -51,7 +52,9 @@ func TestProcessHeaderOverride_ChannelTestSkipsPassthroughRules(t *testing.T) {
 		IsChannelTest: true,
 		ChannelMeta: &relaycommon.ChannelMeta{
 			HeadersOverride: map[string]any{
-				"*": "",
+				"*":                     "",
+				"X-Panstar-State-Owner": "static-owner",
+				"X-Owner-Leak":          "{client_header:X-Panstar-State-Owner}",
 			},
 		},
 	}
@@ -148,6 +151,7 @@ func TestProcessHeaderOverride_PassthroughSkipsAcceptEncoding(t *testing.T) {
 	ctx.Request = httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
 	ctx.Request.Header.Set("X-Trace-Id", "trace-123")
 	ctx.Request.Header.Set("Accept-Encoding", "gzip")
+	ctx.Request.Header.Set("X-Panstar-State-Owner", strings.Repeat("a", 64))
 
 	info := &relaycommon.RelayInfo{
 		IsChannelTest: false,
@@ -164,6 +168,10 @@ func TestProcessHeaderOverride_PassthroughSkipsAcceptEncoding(t *testing.T) {
 
 	_, hasAcceptEncoding := headers["accept-encoding"]
 	require.False(t, hasAcceptEncoding)
+	_, hasStateOwner := headers["x-panstar-state-owner"]
+	require.False(t, hasStateOwner)
+	_, hasOwnerLeak := headers["x-owner-leak"]
+	require.False(t, hasOwnerLeak)
 }
 
 func TestProcessHeaderOverride_PassHeadersTemplateSetsRuntimeHeaders(t *testing.T) {
