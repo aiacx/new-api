@@ -117,6 +117,12 @@ func Relay(c *gin.Context, relayFormat types.RelayFormat) {
 		}
 		return
 	}
+	if relayFormat == types.RelayFormatOpenAIResponses {
+		if stateErr := service.PreparePanstarResponseState(c, request); stateErr != nil {
+			newAPIError = stateErr
+			return
+		}
+	}
 
 	relayInfo, err := relaycommon.GenRelayInfo(c, relayFormat, request, ws)
 	if err != nil {

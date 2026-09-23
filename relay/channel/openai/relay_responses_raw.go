@@ -49,11 +49,16 @@ func OaiResponsesRawStreamHandler(c *gin.Context, info *relaycommon.RelayInfo,
 	})
 	defer timer.Stop()
 	buffer := make([]byte, 32*1024)
+	stateTap := service.NewPanstarResponseStateSSETap(c)
 	for {
 		n, readErr := resp.Body.Read(buffer)
 		if n > 0 {
 			timer.Reset(idle)
 			info.SetFirstResponseTime()
+			if stateErr := stateTap.Observe(c, buffer[:n]); stateErr != nil {
+				info.StreamStatus.SetEndReason(relaycommon.StreamEndReasonScannerErr, stateErr)
+				return nil, stateErr
+			}
 			helper.ExtendWriteDeadline(c)
 			written, writeErr := c.Writer.Write(buffer[:n])
 			if writeErr == nil && written != n {

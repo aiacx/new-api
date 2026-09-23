@@ -49,8 +49,21 @@ upstream dispatch; a missing or different channel fails closed. The Gateway
 uses a separate managed service bearer only for a frozen allowlisted route and
 checks the response request ID and actual channel ID. The New API raw SSE
 branch preserves provider frames for Panstar external billing; Panstar alone
-observes usage and settles customer credit. The private service does not
-rewrite requests or persist customer prompt, tool or opaque plaintext.
+observes usage and settles customer credit.
+
+`PANSTAR_RESPONSES_STATE_ENABLED` is an explicit, default-off exception to the
+otherwise stateless private relay. It is available only to the managed external
+billing identity and requires the Gateway-owned `X-Panstar-State-Owner`
+envelope. For `store:true`, New API normalizes the supplier request to
+`store:false`, encrypts the canonical input/output item window with the
+versioned channel-key keyring, and indexes it by a one-way response ID digest.
+For `previous_response_id`, it verifies owner, public model, managed channel and
+30-day expiry before replaying the complete item window to the supplier as a
+stateless request. Unknown, expired and foreign IDs are indistinguishable.
+Plaintext prompt, tool, output and opaque reasoning content must never be
+persisted. The encrypted context limit defaults to 16 MiB and cannot exceed 32
+MiB. This feature does not implement Conversations resources or make PIPIO the
+state authority.
 
 The service must remain private. Panstar user credentials terminate at the
 Panstar Gateway and must never be sent to this process. The fork remains
