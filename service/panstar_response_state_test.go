@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strconv"
 	"testing"
 
 	"github.com/QuantumNous/new-api/common"
@@ -102,6 +103,7 @@ func TestPanstarResponseStateHidesMissingAndForeignOwnership(t *testing.T) {
 			require.NotNil(t, apiErr)
 			require.Equal(t, http.StatusBadRequest, apiErr.StatusCode)
 			require.Equal(t, "response_not_found", string(apiErr.GetErrorCode()))
+			require.Equal(t, strconv.Itoa(test.channel), context.Writer.Header().Get("X-Panstar-NewAPI-Channel-Id"))
 		})
 	}
 }

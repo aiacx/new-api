@@ -67,6 +67,10 @@ func PreparePanstarResponseState(c *gin.Context, request any) *types.NewAPIError
 	if !managed || !ok || channelID <= 0 || !IsExternalBilling(c) {
 		return nil
 	}
+	// State lookup happens before normal channel selection. Still attest the
+	// managed channel fixed by the external-billing credential so Gateway can
+	// authenticate safe pre-route errors such as response_not_found.
+	c.Header("X-Panstar-NewAPI-Channel-Id", strconv.Itoa(channelID))
 	req, ok := request.(*dto.OpenAIResponsesRequest)
 	if !ok || req == nil {
 		return nil
