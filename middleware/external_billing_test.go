@@ -1,6 +1,7 @@
 package middleware
 
 import (
+	"crypto/hmac"
 	"crypto/sha256"
 	"encoding/hex"
 	"net/http/httptest"
@@ -40,6 +41,42 @@ func TestManagedBillingPinsConfiguredChannelBeforeDistribution(t *testing.T) {
 	assert.Equal(t, dto.PinSourceToken, pin.Source)
 	assert.Equal(t, dto.PinRetrySingleAttempt, pin.RetryMode)
 	assert.Empty(t, overridden)
+}
+
+func TestManagedBillingAcceptsOnlySignedRequestScopedChannelOverride(t *testing.T) {
+	t.Setenv("EXTERNAL_BILLING_MANAGED_CHANNEL_ID", "5")
+	const bearer = "managed-service-secret"
+	const requestID = "req_ps_signed_channel_123"
+	const path = "/v1/responses"
+	mac := hmac.New(sha256.New, []byte(bearer))
+	_, _ = mac.Write([]byte(managedExternalBillingChannelCanonical(path, requestID, 8)))
+	signature := hex.EncodeToString(mac.Sum(nil))
+
+	channel, err := managedExternalBillingChannel(path, requestID, bearer, "8", signature)
+	require.NoError(t, err)
+	assert.Equal(t, 8, channel)
+
+	for _, attempt := range []struct {
+		path, requestID, channel, signature string
+	}{
+		{path, requestID, "9", signature},
+		{path, requestID + "x", "8", signature},
+		{"/v1/chat/completions", requestID, "8", signature},
+		{path, requestID, "8", "00" + signature[2:]},
+		{path, requestID, "8", ""},
+	} {
+		_, err := managedExternalBillingChannel(attempt.path, attempt.requestID,
+			bearer, attempt.channel, attempt.signature)
+		require.Error(t, err)
+	}
+}
+
+func TestManagedBillingKeepsConfiguredDefaultWithoutOverride(t *testing.T) {
+	t.Setenv("EXTERNAL_BILLING_MANAGED_CHANNEL_ID", "5")
+	channel, err := managedExternalBillingChannel("/v1/responses",
+		"req_ps_default_channel_123", "managed-service-secret", "", "")
+	require.NoError(t, err)
+	assert.Equal(t, 5, channel)
 }
 
 func TestPanstarRequestIDRequiresSafeBoundedIdentifier(t *testing.T) {

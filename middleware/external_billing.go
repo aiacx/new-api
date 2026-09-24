@@ -2,9 +2,11 @@ package middleware
 
 import (
 	"context"
+	"crypto/hmac"
 	"crypto/sha256"
 	"crypto/subtle"
 	"encoding/hex"
+	"errors"
 	"net/http"
 	"os"
 	"regexp"
@@ -23,6 +25,11 @@ import (
 var panstarRequestIDPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._:-]{7,127}$`)
 var managedBillingGroupPattern = regexp.MustCompile(`^[A-Za-z][A-Za-z0-9_-]{2,63}$`)
 
+const (
+	panstarManagedChannelHeader          = "X-Panstar-Managed-Channel-Id"
+	panstarManagedChannelSignatureHeader = "X-Panstar-Managed-Channel-Signature"
+)
+
 // authenticateExternalBillingService recognizes a private Panstar service
 // credential by digest. The raw credential never needs a tokens-table row.
 func authenticateExternalBillingService(c *gin.Context, bearer string) bool {
@@ -34,6 +41,10 @@ func authenticateExternalBillingService(c *gin.Context, bearer string) bool {
 	if !primary && !managed {
 		return false
 	}
+	requestedChannel := strings.TrimSpace(c.GetHeader(panstarManagedChannelHeader))
+	channelSignature := strings.TrimSpace(c.GetHeader(panstarManagedChannelSignatureHeader))
+	c.Request.Header.Del(panstarManagedChannelHeader)
+	c.Request.Header.Del(panstarManagedChannelSignatureHeader)
 	if primary && managed {
 		abortExternalBilling(c, "external_billing_identity_ambiguous")
 		return true
@@ -70,22 +81,21 @@ func authenticateExternalBillingService(c *gin.Context, bearer string) bool {
 		abortExternalBilling(c, "external_billing_group_invalid")
 		return true
 	}
+	requestID := c.GetHeader("X-Panstar-Request-Id")
+	if !panstarRequestIDPattern.MatchString(requestID) {
+		abortExternalBilling(c, "external_billing_request_id_invalid")
+		return true
+	}
 	if managed {
-		channelID, parseErr := strconv.Atoi(strings.TrimSpace(
-			os.Getenv("EXTERNAL_BILLING_MANAGED_CHANNEL_ID")))
-		if parseErr != nil || channelID <= 0 {
+		channelID, channelErr := managedExternalBillingChannel(c.Request.URL.Path,
+			requestID, bearer, requestedChannel, channelSignature)
+		if channelErr != nil {
 			abortExternalBilling(c, "external_billing_channel_invalid")
 			return true
 		}
 		c.Set("external_billing_managed_channel_id", channelID)
 		pinManagedExternalBillingChannel(c, channelID)
 	}
-	requestID := c.GetHeader("X-Panstar-Request-Id")
-	if !panstarRequestIDPattern.MatchString(requestID) {
-		abortExternalBilling(c, "external_billing_request_id_invalid")
-		return true
-	}
-
 	user.WriteContext(c)
 	common.SetContextKey(c, constant.ContextKeyUsingGroup, user.Group)
 	synthetic := &model.Token{Id: 0, UserId: user.Id, Name: "panstar-external-service",
@@ -104,6 +114,36 @@ func authenticateExternalBillingService(c *gin.Context, bearer string) bool {
 	c.Request = c.Request.WithContext(context.WithValue(requestContext,
 		string(constant.ContextKeyExternalBilling), true))
 	return true
+}
+
+func managedExternalBillingChannel(path, requestID, bearer, requested, signature string) (int, error) {
+	defaultChannel, err := strconv.Atoi(strings.TrimSpace(
+		os.Getenv("EXTERNAL_BILLING_MANAGED_CHANNEL_ID")))
+	if err != nil || defaultChannel <= 0 {
+		return 0, errors.New("managed channel is invalid")
+	}
+	if requested == "" && signature == "" {
+		return defaultChannel, nil
+	}
+	channelID, err := strconv.Atoi(requested)
+	if err != nil || channelID <= 0 || signature == "" || bearer == "" {
+		return 0, errors.New("managed channel override is invalid")
+	}
+	provided, err := hex.DecodeString(signature)
+	if err != nil || len(provided) != sha256.Size {
+		return 0, errors.New("managed channel signature is invalid")
+	}
+	mac := hmac.New(sha256.New, []byte(bearer))
+	_, _ = mac.Write([]byte(managedExternalBillingChannelCanonical(
+		path, requestID, channelID)))
+	if subtle.ConstantTimeCompare(mac.Sum(nil), provided) != 1 {
+		return 0, errors.New("managed channel signature did not match")
+	}
+	return channelID, nil
+}
+
+func managedExternalBillingChannelCanonical(path, requestID string, channelID int) string {
+	return "panstar-managed-channel-v1\n" + requestID + "\n" + path + "\n" + strconv.Itoa(channelID)
 }
 
 func pinManagedExternalBillingChannel(c *gin.Context, channelID int) {

@@ -51,6 +51,14 @@ checks the response request ID and actual channel ID. The New API raw SSE
 branch preserves provider frames for Panstar external billing; Panstar alone
 observes usage and settles customer credit.
 
+One managed service identity may use multiple encrypted channels without
+sharing provider credentials. Gateway sends `X-Panstar-Managed-Channel-Id` and
+an HMAC-SHA256 signature bound to request ID, private request path and channel
+ID. New API verifies the signature with the already authenticated managed
+bearer, removes both headers before relay, pins exactly one channel and disables
+automatic retry. An unsigned request retains the configured default channel for
+rolling compatibility; a partial, malformed or altered override fails closed.
+
 `PANSTAR_RESPONSES_STATE_ENABLED` is an explicit, default-off exception to the
 otherwise stateless private relay. It is available only to the managed external
 billing identity and requires the Gateway-owned `X-Panstar-State-Owner`
