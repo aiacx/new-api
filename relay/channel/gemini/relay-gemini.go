@@ -2,6 +2,7 @@ package gemini
 
 import (
 	"context"
+	"encoding/base64"
 	"errors"
 	"fmt"
 	"io"
@@ -551,6 +552,60 @@ func GeminiImageHandler(c *gin.Context, info *relaycommon.RelayInfo, resp *http.
 	}
 
 	return usage, nil
+}
+
+func GeminiNativeImageHandler(c *gin.Context, info *relaycommon.RelayInfo, resp *http.Response) (*dto.Usage, *types.NewAPIError) {
+	responseBody, readErr := io.ReadAll(resp.Body)
+	if readErr != nil {
+		return nil, types.NewOpenAIError(readErr, types.ErrorCodeBadResponseBody, http.StatusInternalServerError)
+	}
+	_ = resp.Body.Close()
+
+	var geminiResponse dto.GeminiChatResponse
+	if jsonErr := common.Unmarshal(responseBody, &geminiResponse); jsonErr != nil {
+		return nil, types.NewOpenAIError(jsonErr, types.ErrorCodeBadResponseBody, http.StatusInternalServerError)
+	}
+	openAIResponse, convertErr := convertGeminiNativeImageResponse(&geminiResponse)
+	if convertErr != nil {
+		return nil, types.NewOpenAIError(convertErr, types.ErrorCodeBadResponseBody, http.StatusInternalServerError)
+	}
+	jsonResponse, jsonErr := common.Marshal(openAIResponse)
+	if jsonErr != nil {
+		return nil, types.NewOpenAIError(jsonErr, types.ErrorCodeBadResponseBody, http.StatusInternalServerError)
+	}
+
+	c.Writer.Header().Set("Content-Type", "application/json")
+	c.Writer.WriteHeader(resp.StatusCode)
+	_, _ = c.Writer.Write(jsonResponse)
+	usage := buildUsageFromGeminiResponse(c, info, &geminiResponse)
+	return &usage, nil
+}
+
+func convertGeminiNativeImageResponse(response *dto.GeminiChatResponse) (*dto.ImageResponse, error) {
+	if response == nil {
+		return nil, errors.New("Gemini image response is nil")
+	}
+	result := &dto.ImageResponse{
+		Created: common.GetTimestamp(),
+		Data:    make([]dto.ImageData, 0),
+	}
+	for _, candidate := range response.Candidates {
+		for _, part := range candidate.Content.Parts {
+			if part.InlineData == nil || !strings.HasPrefix(part.InlineData.MimeType, "image/") {
+				continue
+			}
+			encoded := strings.ReplaceAll(strings.ReplaceAll(part.InlineData.Data, "\r", ""), "\n", "")
+			decoded, err := base64.StdEncoding.DecodeString(encoded)
+			if err != nil || len(decoded) == 0 {
+				return nil, errors.New("Gemini image response contains invalid base64 data")
+			}
+			result.Data = append(result.Data, dto.ImageData{B64Json: encoded})
+		}
+	}
+	if len(result.Data) == 0 {
+		return nil, errors.New("Gemini image response did not contain an image")
+	}
+	return result, nil
 }
 
 type GeminiModelsResponse struct {

@@ -1,6 +1,7 @@
 package gemini
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -64,6 +65,9 @@ func (a *Adaptor) ConvertAudioRequest(c *gin.Context, info *relaycommon.RelayInf
 }
 
 func (a *Adaptor) ConvertImageRequest(c *gin.Context, info *relaycommon.RelayInfo, request dto.ImageRequest) (any, error) {
+	if isGeminiNativeImageGenerationModel(info.UpstreamModelName) {
+		return convertGeminiNativeImageRequest(request)
+	}
 	if !strings.HasPrefix(info.UpstreamModelName, "imagen") {
 		return nil, errors.New("not supported model for image generation, only imagen models are supported")
 	}
@@ -127,6 +131,75 @@ func (a *Adaptor) ConvertImageRequest(c *gin.Context, info *relaycommon.RelayInf
 	}
 
 	return geminiRequest, nil
+}
+
+func isGeminiNativeImageGenerationModel(model string) bool {
+	switch strings.TrimSpace(model) {
+	case "gemini-2.5-flash-image",
+		"gemini-3-pro-image",
+		"gemini-3.1-flash-image",
+		"gemini-3-pro-image-preview",
+		"nano-banana-pro-preview",
+		"gemini-3.1-flash-image-preview":
+		return true
+	default:
+		return false
+	}
+}
+
+func convertGeminiNativeImageRequest(request dto.ImageRequest) (*dto.GeminiChatRequest, error) {
+	count, err := request.ImageCount(false)
+	if err != nil {
+		return nil, err
+	}
+	if count != 1 {
+		return nil, errors.New("Gemini native image generation requires n=1")
+	}
+
+	imageConfig := map[string]string{
+		"aspectRatio": geminiImageAspectRatio(request.Size),
+		"imageSize":   geminiImageSize(request.Quality),
+	}
+	encodedConfig, err := json.Marshal(imageConfig)
+	if err != nil {
+		return nil, fmt.Errorf("marshal Gemini image config: %w", err)
+	}
+
+	return &dto.GeminiChatRequest{
+		Contents: []dto.GeminiChatContent{{
+			Role:  "user",
+			Parts: []dto.GeminiPart{{Text: request.Prompt}},
+		}},
+		GenerationConfig: dto.GeminiChatGenerationConfig{
+			CandidateCount:     lo.ToPtr(1),
+			ResponseModalities: []string{"IMAGE"},
+			ImageConfig:        encodedConfig,
+		},
+	}, nil
+}
+
+func geminiImageAspectRatio(size string) string {
+	switch strings.TrimSpace(size) {
+	case "1536x1024", "3:2":
+		return "3:2"
+	case "1024x1536", "2:3":
+		return "2:3"
+	case "1024x1792", "9:16":
+		return "9:16"
+	case "1792x1024", "16:9":
+		return "16:9"
+	default:
+		return "1:1"
+	}
+}
+
+func geminiImageSize(quality string) string {
+	switch strings.TrimSpace(strings.ToLower(quality)) {
+	case "hd", "high", "2k":
+		return "2K"
+	default:
+		return "1K"
+	}
 }
 
 func (a *Adaptor) Init(info *relaycommon.RelayInfo) {
@@ -260,6 +333,11 @@ func (a *Adaptor) DoResponse(c *gin.Context, resp *http.Response, info *relaycom
 		} else {
 			return GeminiTextGenerationHandler(c, info, resp)
 		}
+	}
+
+	if info.RelayMode == constant.RelayModeImagesGenerations &&
+		isGeminiNativeImageGenerationModel(info.UpstreamModelName) {
+		return GeminiNativeImageHandler(c, info, resp)
 	}
 
 	if strings.HasPrefix(info.UpstreamModelName, "imagen") {
