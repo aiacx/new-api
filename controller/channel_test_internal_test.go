@@ -4,8 +4,10 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync/atomic"
 	"testing"
 
@@ -22,6 +24,28 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+func TestReadStreamCanaryPreservesTerminalEventBeyondEightKiB(t *testing.T) {
+	delta := "data: {\"type\":\"response.output_text.delta\",\"delta\":\"" +
+		strings.Repeat("x", 240) + "\"}\n\n"
+	stream := strings.Repeat(delta, 48) +
+		"data: {\"type\":\"response.completed\",\"response\":{}}\n\n"
+	require.Greater(t, len(stream), 8<<10)
+	require.Less(t, len(stream), maxStreamCanaryBytes)
+
+	body, err := readTestResponseBody(io.NopCloser(strings.NewReader(stream)), true)
+
+	require.NoError(t, err)
+	require.NoError(t, validateTestResponseBody(body, true, true))
+}
+
+func TestReadStreamCanaryRejectsBodyAboveBound(t *testing.T) {
+	stream := strings.Repeat("x", maxStreamCanaryBytes+1)
+
+	_, err := readTestResponseBody(io.NopCloser(strings.NewReader(stream)), true)
+
+	require.ErrorContains(t, err, "stream response body exceeds")
+}
 
 func TestGetChannelDefaultBaseURLsUsesBuiltInDefaults(t *testing.T) {
 	originalBaseURLs := constant.ChannelBaseURLs

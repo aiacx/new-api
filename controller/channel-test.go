@@ -41,6 +41,8 @@ type testResult struct {
 	newAPIError *types.NewAPIError
 }
 
+const maxStreamCanaryBytes = 256 << 10
+
 func normalizeChannelTestEndpoint(channel *model.Channel, endpointType string) string {
 	normalized := strings.TrimSpace(endpointType)
 	if normalized != "" {
@@ -606,9 +608,16 @@ func coerceTestUsage(usageAny any, isStream bool, estimatePromptTokens int) (*dt
 
 func readTestResponseBody(body io.ReadCloser, isStream bool) ([]byte, error) {
 	defer func() { _ = body.Close() }()
-	const maxStreamLogBytes = 8 << 10
 	if isStream {
-		return io.ReadAll(io.LimitReader(body, maxStreamLogBytes))
+		limited := &io.LimitedReader{R: body, N: maxStreamCanaryBytes + 1}
+		responseBody, err := io.ReadAll(limited)
+		if err != nil {
+			return nil, err
+		}
+		if len(responseBody) > maxStreamCanaryBytes {
+			return nil, fmt.Errorf("stream response body exceeds %d-byte canary limit", maxStreamCanaryBytes)
+		}
+		return responseBody, nil
 	}
 	return io.ReadAll(body)
 }
