@@ -28,6 +28,9 @@ var managedBillingGroupPattern = regexp.MustCompile(`^[A-Za-z][A-Za-z0-9_-]{2,63
 const (
 	panstarManagedChannelHeader          = "X-Panstar-Managed-Channel-Id"
 	panstarManagedChannelSignatureHeader = "X-Panstar-Managed-Channel-Signature"
+	PanstarRelayStageHeader              = "X-Panstar-Relay-Stage"
+	PanstarRelayStagePreRoute            = "PRE_ROUTE"
+	PanstarRelayStageRouted              = "ROUTED"
 )
 
 // authenticateExternalBillingService recognizes a private Panstar service
@@ -45,6 +48,7 @@ func authenticateExternalBillingService(c *gin.Context, bearer string) bool {
 	channelSignature := strings.TrimSpace(c.GetHeader(panstarManagedChannelSignatureHeader))
 	c.Request.Header.Del(panstarManagedChannelHeader)
 	c.Request.Header.Del(panstarManagedChannelSignatureHeader)
+	c.Request.Header.Del(PanstarRelayStageHeader)
 	if primary && managed {
 		abortExternalBilling(c, "external_billing_identity_ambiguous")
 		return true
@@ -110,6 +114,9 @@ func authenticateExternalBillingService(c *gin.Context, bearer string) bool {
 	c.Set(common.RequestIdKey, requestID)
 	c.Header(common.RequestIdKey, requestID)
 	c.Header("X-Panstar-Request-Id", requestID)
+	if managed {
+		c.Header(PanstarRelayStageHeader, PanstarRelayStagePreRoute)
+	}
 	requestContext := context.WithValue(c.Request.Context(), common.RequestIdKey, requestID)
 	c.Request = c.Request.WithContext(context.WithValue(requestContext,
 		string(constant.ContextKeyExternalBilling), true))

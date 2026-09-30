@@ -4,14 +4,19 @@ import (
 	"crypto/hmac"
 	"crypto/sha256"
 	"encoding/hex"
+	"net/http"
 	"net/http/httptest"
 	"testing"
 
+	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/dto"
+	"github.com/QuantumNous/new-api/model"
 	"github.com/QuantumNous/new-api/service"
 	"github.com/gin-gonic/gin"
+	"github.com/glebarez/sqlite"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"gorm.io/gorm"
 )
 
 func TestExternalBillingBearerMatchesOnlyExactDigest(t *testing.T) {
@@ -101,4 +106,63 @@ func TestManagedBillingRequiresDedicatedGroup(t *testing.T) {
 			t.Fatalf("unsafe managed group accepted: %q", group)
 		}
 	}
+}
+
+func TestManagedRelayStageOnlyFollowsAuthenticatedChannelBinding(t *testing.T) {
+	previousDB, previousRedis := model.DB, common.RedisEnabled
+	database, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
+	require.NoError(t, err)
+	sqlDB, err := database.DB()
+	require.NoError(t, err)
+	sqlDB.SetMaxOpenConns(1)
+	model.DB, common.RedisEnabled = database, false
+	t.Cleanup(func() {
+		model.DB, common.RedisEnabled = previousDB, previousRedis
+		require.NoError(t, sqlDB.Close())
+	})
+	require.NoError(t, database.AutoMigrate(&model.User{}))
+	require.NoError(t, database.Create(&model.User{
+		Id: 11, Username: "managed-service", Status: common.UserStatusEnabled,
+		Group: "panstar_managed",
+	}).Error)
+
+	const bearer = "synthetic-managed-credential"
+	const requestID = "req_ps_stage_test_123"
+	const path = "/v1/responses"
+	primaryDigest := sha256.Sum256([]byte("synthetic-primary-credential"))
+	managedDigest := sha256.Sum256([]byte(bearer))
+	t.Setenv("EXTERNAL_BILLING_ENABLED", "true")
+	t.Setenv("EXTERNAL_BILLING_BEARER_SHA256", hex.EncodeToString(primaryDigest[:]))
+	t.Setenv("EXTERNAL_BILLING_MANAGED_BEARER_SHA256", hex.EncodeToString(managedDigest[:]))
+	t.Setenv("EXTERNAL_BILLING_USER_ID", "10")
+	t.Setenv("EXTERNAL_BILLING_MANAGED_USER_ID", "11")
+	t.Setenv("EXTERNAL_BILLING_MANAGED_GROUP", "panstar_managed")
+	t.Setenv("EXTERNAL_BILLING_MANAGED_CHANNEL_ID", "91")
+	mac := hmac.New(sha256.New, []byte(bearer))
+	_, _ = mac.Write([]byte(managedExternalBillingChannelCanonical(path, requestID, 91)))
+	signature := hex.EncodeToString(mac.Sum(nil))
+
+	newContext := func(signature string) (*gin.Context, *httptest.ResponseRecorder) {
+		recorder := httptest.NewRecorder()
+		context, _ := gin.CreateTestContext(recorder)
+		context.Request = httptest.NewRequest(http.MethodPost, path, nil)
+		context.Request.Header.Set("X-Panstar-Request-Id", requestID)
+		context.Request.Header.Set(panstarManagedChannelHeader, "91")
+		context.Request.Header.Set(panstarManagedChannelSignatureHeader, signature)
+		context.Request.Header.Set(PanstarRelayStageHeader, PanstarRelayStageRouted)
+		return context, recorder
+	}
+	valid, validRecorder := newContext(signature)
+	require.True(t, authenticateExternalBillingService(valid, bearer))
+	require.False(t, valid.IsAborted())
+	require.Equal(t, PanstarRelayStagePreRoute,
+		validRecorder.Header().Get(PanstarRelayStageHeader))
+	require.Equal(t, requestID, validRecorder.Header().Get("X-Panstar-Request-Id"))
+	require.Empty(t, validRecorder.Header().Get("X-Panstar-NewAPI-Channel-Id"))
+
+	invalid, invalidRecorder := newContext("00" + signature[2:])
+	require.True(t, authenticateExternalBillingService(invalid, bearer))
+	require.True(t, invalid.IsAborted())
+	require.Empty(t, invalidRecorder.Header().Get(PanstarRelayStageHeader))
+	require.Empty(t, invalidRecorder.Header().Get("X-Panstar-NewAPI-Channel-Id"))
 }
