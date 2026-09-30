@@ -172,6 +172,7 @@ func Relay(c *gin.Context, relayFormat types.RelayFormat) {
 			newAPIError = channelErr
 			break
 		}
+		attestExternalBillingRoute(c, channel.Id)
 		if !service.ManagedExternalBillingChannelMatches(c, channel.Id) {
 			newAPIError = types.NewErrorWithStatusCode(
 				errors.New("managed external billing channel drift"),
@@ -180,9 +181,6 @@ func Relay(c *gin.Context, relayFormat types.RelayFormat) {
 			break
 		}
 		service.AppendUsedChannel(c, channel.Id)
-		if service.IsExternalBilling(c) {
-			c.Header("X-Panstar-NewAPI-Channel-Id", fmt.Sprint(channel.Id))
-		}
 		if billingErr := service.PrepareTieredBillingForSelectedGroup(c, relayInfo); billingErr != nil {
 			newAPIError = billingErr
 			break
@@ -233,6 +231,16 @@ func Relay(c *gin.Context, relayFormat types.RelayFormat) {
 	if len(useChannel) > 1 {
 		retryLogStr := fmt.Sprintf("重试：%s", strings.Trim(strings.Join(strings.Fields(fmt.Sprint(useChannel)), "->"), "[]"))
 		logger.LogInfo(c, retryLogStr)
+	}
+}
+
+func attestExternalBillingRoute(c *gin.Context, channelID int) {
+	if !service.IsExternalBilling(c) {
+		return
+	}
+	c.Header("X-Panstar-NewAPI-Channel-Id", fmt.Sprint(channelID))
+	if _, managed := c.Get("external_billing_managed_channel_id"); managed {
+		c.Header(middleware.PanstarRelayStageHeader, middleware.PanstarRelayStageRouted)
 	}
 }
 
