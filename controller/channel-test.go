@@ -24,6 +24,7 @@ import (
 	relayconstant "github.com/QuantumNous/new-api/relay/constant"
 	"github.com/QuantumNous/new-api/relay/helper"
 	"github.com/QuantumNous/new-api/relaykit/dto"
+	"github.com/QuantumNous/new-api/relaykit/relayconvert"
 	"github.com/QuantumNous/new-api/relaykit/types"
 	"github.com/QuantumNous/new-api/service"
 	"github.com/QuantumNous/new-api/setting/operation_setting"
@@ -756,11 +757,25 @@ func buildTestRequest(model string, endpointType string, channel *model.Channel,
 			}
 		case constant.EndpointTypeOpenAIResponse:
 			// 返回 OpenAIResponsesRequest
-			return &dto.OpenAIResponsesRequest{
+			testRequest := &dto.OpenAIResponsesRequest{
 				Model:  model,
 				Input:  json.RawMessage(`[{"role":"user","content":"hi"}]`),
 				Stream: lo.ToPtr(isStream),
 			}
+			if channel != nil && channel.Type == constant.ChannelTypeAdvancedCustom &&
+				strings.HasPrefix(strings.ToLower(model), "claude-") {
+				route, matched := channel.GetOtherSettings().AdvancedCustom.MatchPathForModel("/v1/responses", model)
+				if matched && !route.PassThroughBodyEnabled &&
+					strings.TrimSpace(route.Converter) == relayconvert.ConverterOpenAIResponsesToOpenAIChat {
+					// A greeting can exhaust the upstream's small default and correctly end as
+					// response.incomplete. Ask this synthetic canary for the same bounded
+					// completion as the customer token test, without weakening terminal checks.
+					testRequest.Input = json.RawMessage(`[{"role":"user","content":"Reply exactly OK"}]`)
+					testRequest.Temperature = lo.ToPtr(0.0)
+					testRequest.MaxOutputTokens = lo.ToPtr(uint(32))
+				}
+			}
+			return testRequest
 		case constant.EndpointTypeOpenAIResponseCompact:
 			// 返回 OpenAIResponsesCompactionRequest
 			return &dto.OpenAIResponsesCompactionRequest{
