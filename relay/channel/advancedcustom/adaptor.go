@@ -1,13 +1,17 @@
 package advancedcustom
 
 import (
+	"bytes"
+	"crypto/sha256"
 	"errors"
 	"fmt"
 	"io"
 	"net/http"
 	"net/url"
+	"slices"
 	"strings"
 
+	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/constant"
 	"github.com/QuantumNous/new-api/relay/channel"
 	"github.com/QuantumNous/new-api/relay/channel/claude"
@@ -15,10 +19,12 @@ import (
 	"github.com/QuantumNous/new-api/relay/channel/openai"
 	relaycommon "github.com/QuantumNous/new-api/relay/common"
 	relayconstant "github.com/QuantumNous/new-api/relay/constant"
+	"github.com/QuantumNous/new-api/relay/helper"
 	"github.com/QuantumNous/new-api/relaykit/dto"
 	"github.com/QuantumNous/new-api/relaykit/relayconvert"
 	"github.com/QuantumNous/new-api/relaykit/types"
 	"github.com/QuantumNous/new-api/service"
+	"github.com/QuantumNous/new-api/setting/model_setting"
 	"github.com/gin-gonic/gin"
 	"github.com/samber/lo"
 )
@@ -26,6 +32,8 @@ import (
 const ChannelName = "advanced_custom"
 
 const advancedCustomModelPlaceholder = "{model}"
+
+const pipioClaudeResponsesOutputLimitProfile = "PIPIO_CLAUDE_RESPONSES_OUTPUT_LIMIT_V1"
 
 type Adaptor struct {
 	openaiAdaptor openai.Adaptor
@@ -36,6 +44,8 @@ type Adaptor struct {
 	converted bool
 	route     dto.AdvancedCustomRoute
 	converter string
+
+	pipioClaudeOutputLimit uint
 }
 
 func (a *Adaptor) Init(info *relaycommon.RelayInfo) {
@@ -264,6 +274,11 @@ func (a *Adaptor) DoRequest(c *gin.Context, info *relaycommon.RelayInfo, request
 	}
 	if !a.converted && !a.route.SupportsPassThroughBody() {
 		return nil, errors.New("advanced custom converter routes cannot be used with pass-through request body")
+	}
+	if a.pipioClaudeOutputLimit > 0 {
+		if err := a.recordPipioClaudeOutboundBudget(c, info, requestBody); err != nil {
+			return nil, types.NewErrorWithStatusCode(err, types.ErrorCodeConvertRequestFailed, http.StatusBadRequest, types.ErrOptionWithSkipRetry())
+		}
 	}
 
 	if info.RelayMode == relayconstant.RelayModeAudioTranscription ||
@@ -528,7 +543,123 @@ func (a *Adaptor) convertCrossProtocolChatRequest(c *gin.Context, info *relaycom
 	if info.SupportStreamOptions && info.IsStream {
 		chatRequest.StreamOptions = &dto.StreamOptions{IncludeUsage: true}
 	}
-	return a.convertOpenAICompatibleRequest(c, info, chatRequest)
+	converted, err := a.convertOpenAICompatibleRequest(c, info, chatRequest)
+	if err != nil {
+		return nil, err
+	}
+	if a.isPipioClaudeResponsesConversion(c, info) {
+		responsesRequest, ok := request.(dto.OpenAIResponsesRequest)
+		if !ok {
+			return nil, errors.New("expected OpenAI Responses request for Pipio Claude output limit")
+		}
+		convertedChat, ok := converted.(*dto.GeneralOpenAIRequest)
+		if !ok {
+			return nil, fmt.Errorf("expected OpenAI chat completions request, got %T", converted)
+		}
+		if err := a.normalizePipioClaudeResponsesOutputLimit(convertedChat, responsesRequest.MaxOutputTokens); err != nil {
+			return nil, &types.ConversionLossError{Diagnostics: []types.ConversionDiagnostic{{
+				Code: "PIPIO_CLAUDE_INVALID_OUTPUT_LIMIT", Path: "max_output_tokens", Message: err.Error(),
+				Severity: types.ConversionDiagnosticError, From: types.RelayFormatOpenAIResponses, To: types.RelayFormatOpenAI,
+			}}}
+		}
+	}
+	return converted, nil
+}
+
+// The selected channel identity comes from operator configuration, never from
+// the calling user's group or request headers. Other providers and native or
+// pass-through routes retain their existing token-limit fields.
+func (a *Adaptor) isPipioClaudeResponsesConversion(c *gin.Context, info *relaycommon.RelayInfo) bool {
+	return c != nil && info != nil && info.ChannelMeta != nil &&
+		info.ChannelType == constant.ChannelTypeAdvancedCustom &&
+		common.GetContextKeyString(c, constant.ContextKeyChannelName) == "panstar-pipio-claude" &&
+		common.GetContextKeyString(c, constant.ContextKeyChannelGroup) == "panstar_pipio_claude" &&
+		info.ChannelBaseUrl == "http://ai-upstream-pipio:8080" &&
+		info.RelayFormat == types.RelayFormatOpenAIResponses && info.RelayMode == relayconstant.RelayModeResponses &&
+		incomingRequestPath(c, info) == "/v1/responses" && a.route.IncomingPath == "/v1/responses" &&
+		a.route.UpstreamPath == "/v1/chat/completions" && a.converter == relayconvert.ConverterOpenAIResponsesToOpenAIChat &&
+		!a.route.PassThroughBodyEnabled && !info.ChannelSetting.PassThroughBodyEnabled &&
+		!model_setting.GetGlobalSettings().PassThroughRequestEnabled &&
+		strings.HasPrefix(info.OriginModelName, "claude-") && info.OriginModelName == info.UpstreamModelName
+}
+
+func (a *Adaptor) normalizePipioClaudeResponsesOutputLimit(request *dto.GeneralOpenAIRequest, requested *uint) error {
+	if request != nil && requested == nil && request.MaxTokens == nil && request.MaxCompletionTokens == nil {
+		return nil
+	}
+	if request == nil || requested == nil || *requested == 0 || helper.ExceedsMaxTokensLimit(requested, request.MaxTokens, request.MaxCompletionTokens) {
+		return errors.New("Pipio Claude requires a positive supported max_output_tokens")
+	}
+	if request.MaxTokens != nil && request.MaxCompletionTokens != nil && *request.MaxTokens != *request.MaxCompletionTokens {
+		return errors.New("conflicting Pipio Claude output token limits")
+	}
+	limit := request.MaxCompletionTokens
+	if limit == nil {
+		limit = request.MaxTokens
+	}
+	if limit == nil || *limit != *requested {
+		return errors.New("Pipio Claude converted output token limit differs from max_output_tokens")
+	}
+	// Equal converted aliases are unambiguous; keep the client's exact value.
+	request.MaxTokens = lo.ToPtr(*limit)
+	request.MaxCompletionTokens = nil
+	a.pipioClaudeOutputLimit = *limit
+	return nil
+}
+
+// Inspect independent readers of the final serialized body, after disabled-field
+// filtering and parameter overrides, without consuming the transport's reader.
+func (a *Adaptor) recordPipioClaudeOutboundBudget(c *gin.Context, info *relaycommon.RelayInfo, body io.Reader) error {
+	if !a.isPipioClaudeResponsesConversion(c, info) {
+		return errors.New("Pipio Claude output-limit binding changed before dispatch")
+	}
+	var newReader func() (io.ReadCloser, error)
+	switch body := body.(type) {
+	case common.ReplayableBody:
+		newReader = body.NewReader
+	case *bytes.Buffer:
+		newReader = func() (io.ReadCloser, error) { return io.NopCloser(bytes.NewReader(body.Bytes())), nil }
+	case *bytes.Reader:
+		newReader = func() (io.ReadCloser, error) { copy := *body; return io.NopCloser(&copy), nil }
+	default:
+		return errors.New("Pipio Claude output-limit body is not replayable")
+	}
+	reader, err := newReader()
+	if err != nil {
+		return fmt.Errorf("read Pipio Claude outbound metadata: %w", err)
+	}
+	digest := sha256.New()
+	byteCount, err := io.Copy(digest, reader)
+	closeErr := reader.Close()
+	if err != nil || closeErr != nil {
+		return errors.New("read Pipio Claude outbound metadata failed")
+	}
+	reader, err = newReader()
+	if err != nil {
+		return fmt.Errorf("read Pipio Claude outbound limit: %w", err)
+	}
+	defer reader.Close()
+	var outbound struct {
+		Model               string            `json:"model"`
+		MaxTokens           *uint             `json:"max_tokens"`
+		MaxCompletionTokens common.RawMessage `json:"max_completion_tokens"`
+	}
+	if err := common.DecodeJson(reader, &outbound); err != nil {
+		return errors.New("invalid Pipio Claude outbound token limit")
+	}
+	if outbound.Model != info.UpstreamModelName || outbound.MaxTokens == nil || *outbound.MaxTokens != a.pipioClaudeOutputLimit || len(outbound.MaxCompletionTokens) > 0 {
+		return errors.New("Pipio Claude outbound output budget changed after conversion")
+	}
+	diagnostic := types.ConversionDiagnostic{
+		Code: pipioClaudeResponsesOutputLimitProfile, Path: "max_tokens",
+		Message:  fmt.Sprintf("max_output_tokens=%d max_tokens=%d providerBodyBytes=%d providerBodySha256=%x", a.pipioClaudeOutputLimit, *outbound.MaxTokens, byteCount, digest.Sum(nil)),
+		Severity: types.ConversionDiagnosticWarning, From: types.RelayFormatOpenAIResponses, To: types.RelayFormatOpenAI,
+	}
+	info.RecordConversionDiagnostics(c, []types.ConversionDiagnostic{diagnostic})
+	if !slices.Contains(info.ConversionDiagnostics(), diagnostic) {
+		return errors.New("Pipio Claude outbound output-limit metadata was not retained")
+	}
+	return nil
 }
 
 func (a *Adaptor) convertOpenAICompatibleRequest(c *gin.Context, info *relaycommon.RelayInfo, request *dto.GeneralOpenAIRequest) (any, error) {

@@ -29,6 +29,19 @@ func TestChannelMatchesExpectedTaskPluginUsesGenericChannelSetting(t *testing.T)
 	assert.False(t, channelMatchesExpectedTaskPlugin(nil, channel, ""))
 }
 
+func TestSelectedChannelGroupComesFromChannelAndRefreshesOnRetry(t *testing.T) {
+	c, _ := gin.CreateTestContext(httptest.NewRecorder())
+	c.Request = httptest.NewRequest(http.MethodPost, "/v1/responses", nil)
+	common.SetContextKey(c, constant.ContextKeyUsingGroup, "customer-group")
+	c.Request.Header.Set("X-Channel-Group", "spoofed-group")
+	for _, group := range []string{"panstar_pipio_claude", "other-group"} {
+		channel := &model.Channel{Id: 1, Type: constant.ChannelTypeAdvancedCustom, Name: "panstar-pipio-claude", Group: group, Key: "synthetic-fixture"}
+		require.Nil(t, SetupContextForSelectedChannel(c, channel, "claude-opus-5"))
+		assert.Equal(t, group, common.GetContextKeyString(c, constant.ContextKeyChannelGroup))
+		assert.Equal(t, "customer-group", common.GetContextKeyString(c, constant.ContextKeyUsingGroup))
+	}
+}
+
 func TestChannelMatchesExpectedTaskPluginUsesPinnedLegacyIndex(t *testing.T) {
 	registry := jsplugin.NewRegistry()
 	alpha, err := registry.Register(distributorTaskPluginSource("legacy-alpha", constant.ChannelTypeKling), jsplugin.Options{})

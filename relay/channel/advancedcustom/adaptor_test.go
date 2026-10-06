@@ -2,10 +2,14 @@ package advancedcustom
 
 import (
 	"bytes"
+	"crypto/sha256"
+	"fmt"
 	"io"
+	"math"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"strings"
 	"testing"
 
 	"github.com/QuantumNous/new-api/common"
@@ -15,8 +19,10 @@ import (
 	"github.com/QuantumNous/new-api/relaykit/dto"
 	"github.com/QuantumNous/new-api/relaykit/relayconvert"
 	"github.com/QuantumNous/new-api/relaykit/types"
+	"github.com/QuantumNous/new-api/service"
 	"github.com/QuantumNous/new-api/setting/model_setting"
 	"github.com/gin-gonic/gin"
+	"github.com/samber/lo"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -964,6 +970,364 @@ func TestAdaptorCrossProtocolChatUpstreamRequestsStreamUsage(t *testing.T) {
 			assert.True(t, chatReq.StreamOptions.IncludeUsage)
 		})
 	}
+}
+
+func TestPipioClaudeResponsesOutputLimitOutbound(t *testing.T) {
+	originalTimeout := constant.StreamingTimeout
+	constant.StreamingTimeout = 30
+	t.Cleanup(func() { constant.StreamingTimeout = originalTimeout })
+	service.InitHttpClient()
+	client := service.GetHttpClient()
+	require.NotNil(t, client)
+	originalTransport := client.Transport
+	t.Cleanup(func() { client.Transport = originalTransport })
+	models := []string{
+		"claude-opus-5", "claude-sonnet-5", "claude-haiku-4-5-20251001", "claude-opus-4-7",
+		"claude-fable-5", "claude-opus-4-6", "claude-opus-4-8", "claude-opus-5-5",
+		"claude-opus-4-5-20251101", "claude-sonnet-4-5-20250929", "claude-sonnet-4-6",
+	}
+	for _, model := range models {
+		for _, stream := range []bool{false, true} {
+			t.Run(fmt.Sprintf("%s/stream=%t", model, stream), func(t *testing.T) {
+				adaptor, c, info, request := pipioClaudeResponsesFixture(t, model, stream)
+				recorder := httptest.NewRecorder()
+				originalContext := c
+				c, _ = gin.CreateTestContext(recorder)
+				c.Request, c.Keys = originalContext.Request, originalContext.Keys
+				original := mustAdvancedCustomRawMessage(t, request)
+				converted, err := adaptor.ConvertOpenAIResponsesRequest(c, info, request)
+				require.NoError(t, err)
+				chat, ok := converted.(*dto.GeneralOpenAIRequest)
+				require.True(t, ok)
+				require.NotNil(t, chat.MaxTokens)
+				assert.EqualValues(t, 32, *chat.MaxTokens)
+				assert.Nil(t, chat.MaxCompletionTokens)
+				assert.Equal(t, original, mustAdvancedCustomRawMessage(t, request))
+				require.NotNil(t, chat.Temperature)
+				assert.Zero(t, *chat.Temperature)
+				if stream {
+					require.NotNil(t, chat.StreamOptions)
+					assert.True(t, chat.StreamOptions.IncludeUsage)
+				} else {
+					assert.Nil(t, chat.StreamOptions)
+				}
+				data := mustAdvancedCustomRawMessage(t, chat)
+				data, err = relaycommon.RemoveDisabledFields(data, info.ChannelOtherSettings, false)
+				require.NoError(t, err)
+				body, closer, err := relaycommon.NewOutboundJSONBody(data)
+				require.NoError(t, err)
+				defer closer.Close()
+				var outbound []byte
+				client.Transport = advancedCustomRoundTripFunc(func(r *http.Request) (*http.Response, error) {
+					assert.Equal(t, "http://ai-upstream-pipio:8080/v1/chat/completions", r.URL.String())
+					outbound, err = io.ReadAll(r.Body)
+					require.NoError(t, err)
+					response := fmt.Sprintf(`{"id":"chat-fixture","object":"chat.completion","model":%q,"choices":[{"index":0,"message":{"role":"assistant","content":"OK"},"finish_reason":"stop"}],"usage":{"prompt_tokens":10,"completion_tokens":5,"total_tokens":15}}`, model)
+					contentType := "application/json"
+					if stream {
+						contentType = "text/event-stream"
+						response = fmt.Sprintf("data: {\"id\":\"chat-fixture\",\"object\":\"chat.completion.chunk\",\"model\":%q,\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"content\":\"OK\"},\"finish_reason\":null}]}\n\ndata: {\"id\":\"chat-fixture\",\"model\":%q,\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}]}\n\ndata: {\"id\":\"chat-fixture\",\"model\":%q,\"choices\":[],\"usage\":{\"prompt_tokens\":10,\"completion_tokens\":5,\"total_tokens\":15}}\n\ndata: [DONE]\n\n", model, model, model)
+					}
+					return &http.Response{StatusCode: http.StatusOK, Header: http.Header{"Content-Type": {contentType}}, Body: io.NopCloser(strings.NewReader(response)), Request: r}, nil
+				})
+				response, err := adaptor.DoRequest(c, info, body)
+				require.NoError(t, err)
+				assert.Equal(t, data, outbound, "metadata capture must not consume or rewrite the actual outbound reader")
+				var emitted map[string]common.RawMessage
+				require.NoError(t, common.Unmarshal(outbound, &emitted))
+				assert.JSONEq(t, "32", string(emitted["max_tokens"]))
+				assert.NotContains(t, emitted, "max_completion_tokens")
+				diagnostics := info.ConversionDiagnostics()
+				require.Len(t, diagnostics, 1)
+				assert.Equal(t, pipioClaudeResponsesOutputLimitProfile, diagnostics[0].Code)
+				assert.Equal(t, fmt.Sprintf("max_output_tokens=32 max_tokens=32 providerBodyBytes=%d providerBodySha256=%x", len(outbound), sha256.Sum256(outbound)), diagnostics[0].Message)
+				usageValue, apiErr := adaptor.DoResponse(c, response.(*http.Response), info)
+				require.Nil(t, apiErr)
+				usage, ok := usageValue.(*dto.Usage)
+				require.True(t, ok)
+				assert.EqualValues(t, 10, usage.PromptTokens)
+				assert.EqualValues(t, 5, usage.CompletionTokens)
+				assert.EqualValues(t, 15, usage.TotalTokens)
+				if stream {
+					assert.Contains(t, recorder.Body.String(), "response.completed")
+					assert.NotContains(t, recorder.Body.String(), "response.incomplete")
+				} else {
+					var reply dto.OpenAIResponsesResponse
+					require.NoError(t, common.Unmarshal(recorder.Body.Bytes(), &reply))
+					assert.JSONEq(t, `"completed"`, string(reply.Status))
+				}
+				assert.Equal(t, original, mustAdvancedCustomRawMessage(t, request))
+			})
+		}
+	}
+}
+
+func TestPipioClaudeResponsesOutputLimitScope(t *testing.T) {
+	service.InitHttpClient()
+	client := service.GetHttpClient()
+	originalTransport := client.Transport
+	t.Cleanup(func() { client.Transport = originalTransport })
+	var emitted []byte
+	client.Transport = advancedCustomRoundTripFunc(func(r *http.Request) (*http.Response, error) {
+		var err error
+		emitted, err = io.ReadAll(r.Body)
+		require.NoError(t, err)
+		return &http.Response{StatusCode: http.StatusOK, Header: make(http.Header), Body: io.NopCloser(strings.NewReader("{}")), Request: r}, nil
+	})
+	tests := []struct {
+		name   string
+		change func(*gin.Context, *relaycommon.RelayInfo)
+	}{
+		{"other channel name", func(c *gin.Context, _ *relaycommon.RelayInfo) {
+			common.SetContextKey(c, constant.ContextKeyChannelName, "other")
+		}},
+		{"other selected group", func(c *gin.Context, _ *relaycommon.RelayInfo) {
+			common.SetContextKey(c, constant.ContextKeyChannelGroup, "other")
+		}},
+		{"no selected group despite matching caller group", func(c *gin.Context, _ *relaycommon.RelayInfo) {
+			c.Keys[string(constant.ContextKeyChannelGroup)] = nil
+			common.SetContextKey(c, constant.ContextKeyUsingGroup, "panstar_pipio_claude")
+		}},
+		{"other base", func(_ *gin.Context, info *relaycommon.RelayInfo) { info.ChannelBaseUrl = "https://other.example" }},
+		{"other channel type", func(_ *gin.Context, info *relaycommon.RelayInfo) { info.ChannelType = constant.ChannelTypeOpenAI }},
+		{"other origin model", func(_ *gin.Context, info *relaycommon.RelayInfo) {
+			info.OriginModelName = "gpt-test"
+			info.ChannelOtherSettings.AdvancedCustom.Routes[0].Models = nil
+		}},
+		{"other upstream model", func(_ *gin.Context, info *relaycommon.RelayInfo) { info.UpstreamModelName = "gpt-test" }},
+		{"different Claude model binding", func(_ *gin.Context, info *relaycommon.RelayInfo) { info.UpstreamModelName = "claude-sonnet-5" }},
+		{"native Responses converter", func(_ *gin.Context, info *relaycommon.RelayInfo) {
+			info.ChannelOtherSettings.AdvancedCustom.Routes[0].Converter = relayconvert.ConverterNone
+			info.ChannelOtherSettings.AdvancedCustom.Routes[0].UpstreamPath = "/v1/responses"
+		}},
+		{"none chat destination", func(_ *gin.Context, info *relaycommon.RelayInfo) {
+			info.ChannelOtherSettings.AdvancedCustom.Routes[0].Converter = relayconvert.ConverterNone
+		}},
+		{"passthrough route", func(_ *gin.Context, info *relaycommon.RelayInfo) {
+			info.ChannelOtherSettings.AdvancedCustom.Routes[0].Converter = relayconvert.ConverterNone
+			info.ChannelOtherSettings.AdvancedCustom.Routes[0].PassThroughBodyEnabled = true
+		}},
+		{"channel passthrough", func(_ *gin.Context, info *relaycommon.RelayInfo) { info.ChannelSetting.PassThroughBodyEnabled = true }},
+		{"other upstream path", func(_ *gin.Context, info *relaycommon.RelayInfo) {
+			info.ChannelOtherSettings.AdvancedCustom.Routes[0].UpstreamPath = "https://other.example/v1/chat/completions"
+		}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			adaptor, c, info, request := pipioClaudeResponsesFixture(t, "claude-opus-5", false)
+			tt.change(c, info)
+			converted, err := adaptor.ConvertOpenAIResponsesRequest(c, info, request)
+			require.NoError(t, err)
+			switch converted := converted.(type) {
+			case *dto.GeneralOpenAIRequest:
+				assert.Nil(t, converted.MaxTokens)
+				require.NotNil(t, converted.MaxCompletionTokens)
+				assert.EqualValues(t, 32, *converted.MaxCompletionTokens)
+			case dto.OpenAIResponsesRequest:
+				assert.Equal(t, request.MaxOutputTokens, converted.MaxOutputTokens)
+			default:
+				t.Fatalf("unexpected converted type %T", converted)
+			}
+			assert.Empty(t, info.ConversionDiagnostics())
+			data := mustAdvancedCustomRawMessage(t, converted)
+			response, err := adaptor.DoRequest(c, info, bytes.NewBuffer(data))
+			require.NoError(t, err)
+			require.NoError(t, response.(*http.Response).Body.Close())
+			assert.Equal(t, data, emitted)
+			assert.Empty(t, info.ConversionDiagnostics())
+		})
+	}
+	t.Run("global passthrough", func(t *testing.T) {
+		settings := model_setting.GetGlobalSettings()
+		before := settings.PassThroughRequestEnabled
+		settings.PassThroughRequestEnabled = true
+		t.Cleanup(func() { settings.PassThroughRequestEnabled = before })
+		adaptor, c, info, request := pipioClaudeResponsesFixture(t, "claude-opus-5", false)
+		converted, err := adaptor.ConvertOpenAIResponsesRequest(c, info, request)
+		require.NoError(t, err)
+		chat := converted.(*dto.GeneralOpenAIRequest)
+		assert.Nil(t, chat.MaxTokens)
+		assert.Equal(t, request.MaxOutputTokens, chat.MaxCompletionTokens)
+	})
+	t.Run("Chat none passthrough retains MC", func(t *testing.T) {
+		adaptor, c, info, _ := pipioClaudeResponsesFixture(t, "claude-opus-5", true)
+		info.RelayFormat = types.RelayFormatOpenAI
+		info.RelayMode = relayconstant.RelayModeChatCompletions
+		info.RequestURLPath = "/v1/chat/completions"
+		c.Request.URL.Path = info.RequestURLPath
+		info.ChannelOtherSettings.AdvancedCustom.Routes[0].IncomingPath = info.RequestURLPath
+		info.ChannelOtherSettings.AdvancedCustom.Routes[0].Converter = relayconvert.ConverterNone
+		info.ChannelOtherSettings.AdvancedCustom.Routes[0].PassThroughBodyEnabled = true
+		request := &dto.GeneralOpenAIRequest{Model: info.UpstreamModelName, MaxCompletionTokens: lo.ToPtr(uint(32)), Messages: []dto.Message{{Role: "user", Content: "Reply exactly OK"}}}
+		converted, err := adaptor.ConvertOpenAIRequest(c, info, request)
+		require.NoError(t, err)
+		chat := converted.(*dto.GeneralOpenAIRequest)
+		assert.Nil(t, chat.MaxTokens)
+		require.NotNil(t, chat.MaxCompletionTokens)
+		assert.EqualValues(t, 32, *chat.MaxCompletionTokens)
+		assert.Empty(t, info.ConversionDiagnostics())
+		data := mustAdvancedCustomRawMessage(t, request)
+		adaptor = &Adaptor{}
+		response, err := adaptor.DoRequest(c, info, bytes.NewBuffer(data))
+		require.NoError(t, err)
+		require.NoError(t, response.(*http.Response).Body.Close())
+		assert.Equal(t, data, emitted, "raw none/passthrough chat body remains byte-identical")
+		assert.Empty(t, info.ConversionDiagnostics())
+	})
+}
+
+func TestPipioClaudeResponsesOutputLimitValidation(t *testing.T) {
+	for _, stream := range []bool{false, true} {
+		for _, limit := range []*uint{nil, lo.ToPtr(uint(0)), lo.ToPtr(uint(math.MaxInt32/2 + 1)), lo.ToPtr(^uint(0))} {
+			name := "omitted"
+			if limit != nil {
+				name = fmt.Sprint(*limit)
+			}
+			t.Run(fmt.Sprintf("stream=%t/limit=%s", stream, name), func(t *testing.T) {
+				adaptor, c, info, request := pipioClaudeResponsesFixture(t, "claude-opus-5", stream)
+				request.MaxOutputTokens = limit
+				converted, err := adaptor.ConvertOpenAIResponsesRequest(c, info, request)
+				if limit == nil {
+					require.NoError(t, err)
+					chat := converted.(*dto.GeneralOpenAIRequest)
+					assert.Nil(t, chat.MaxTokens)
+					assert.Nil(t, chat.MaxCompletionTokens)
+					assert.Empty(t, info.ConversionDiagnostics())
+				} else {
+					require.Error(t, err)
+					var conversionLoss *types.ConversionLossError
+					require.ErrorAs(t, err, &conversionLoss)
+					assert.Nil(t, converted)
+				}
+			})
+		}
+	}
+	for _, tt := range []struct {
+		name              string
+		mc, mt, requested *uint
+		wantError         bool
+	}{
+		{"equal converted aliases", lo.ToPtr(uint(32)), lo.ToPtr(uint(32)), lo.ToPtr(uint(32)), false},
+		{"different converted aliases", lo.ToPtr(uint(32)), lo.ToPtr(uint(33)), lo.ToPtr(uint(32)), true},
+		{"zero second alias", lo.ToPtr(uint(32)), lo.ToPtr(uint(0)), lo.ToPtr(uint(32)), true},
+		{"converted budget larger", lo.ToPtr(uint(33)), nil, lo.ToPtr(uint(32)), true},
+		{"converted budget smaller", lo.ToPtr(uint(31)), nil, lo.ToPtr(uint(32)), true},
+		{"converted limit absent", nil, nil, lo.ToPtr(uint(32)), true},
+		{"invented default budget", lo.ToPtr(uint(32)), nil, nil, true},
+		{"existing MT equal", nil, lo.ToPtr(uint(32)), lo.ToPtr(uint(32)), false},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			adaptor := &Adaptor{}
+			request := &dto.GeneralOpenAIRequest{MaxCompletionTokens: tt.mc, MaxTokens: tt.mt}
+			err := adaptor.normalizePipioClaudeResponsesOutputLimit(request, tt.requested)
+			if tt.wantError {
+				require.Error(t, err)
+				assert.Equal(t, tt.mc, request.MaxCompletionTokens)
+				assert.Equal(t, tt.mt, request.MaxTokens)
+			} else {
+				require.NoError(t, err)
+				assert.Nil(t, request.MaxCompletionTokens)
+				require.NotNil(t, request.MaxTokens)
+				assert.EqualValues(t, 32, *request.MaxTokens)
+			}
+		})
+	}
+}
+
+func TestPipioClaudeResponsesOutputLimitFinalOverridesFailClosed(t *testing.T) {
+	for _, override := range []map[string]any{
+		{"max_tokens": 33}, {"max_tokens": 31}, {"max_tokens": 0}, {"max_tokens": nil},
+		{"max_completion_tokens": 32}, {"max_completion_tokens": nil}, {"model": "claude-sonnet-5"},
+	} {
+		t.Run(fmt.Sprint(override), func(t *testing.T) {
+			adaptor, c, info, request := pipioClaudeResponsesFixture(t, "claude-opus-5", false)
+			converted, err := adaptor.ConvertOpenAIResponsesRequest(c, info, request)
+			require.NoError(t, err)
+			info.ParamOverride = override
+			data, err := relaycommon.ApplyParamOverrideWithRelayInfo(mustAdvancedCustomRawMessage(t, converted), info)
+			require.NoError(t, err)
+			body := bytes.NewBuffer(data)
+			response, err := adaptor.DoRequest(c, info, body)
+			require.Error(t, err)
+			assert.Nil(t, response)
+			var apiErr *types.NewAPIError
+			require.ErrorAs(t, err, &apiErr)
+			assert.Equal(t, http.StatusBadRequest, apiErr.StatusCode)
+			assert.True(t, types.IsSkipRetryError(apiErr))
+			assert.Equal(t, data, body.Bytes(), "failed validation must not consume the outbound body")
+			assert.Empty(t, info.ConversionDiagnostics())
+		})
+	}
+	t.Run("closed replay source", func(t *testing.T) {
+		adaptor, c, info, request := pipioClaudeResponsesFixture(t, "claude-opus-5", false)
+		converted, err := adaptor.ConvertOpenAIResponsesRequest(c, info, request)
+		require.NoError(t, err)
+		body, closer, err := relaycommon.NewOutboundJSONBody(mustAdvancedCustomRawMessage(t, converted))
+		require.NoError(t, err)
+		require.NoError(t, closer.Close())
+		_, err = adaptor.DoRequest(c, info, body)
+		require.Error(t, err)
+		assert.Empty(t, info.ConversionDiagnostics())
+	})
+	t.Run("non-replayable body", func(t *testing.T) {
+		adaptor, c, info, request := pipioClaudeResponsesFixture(t, "claude-opus-5", false)
+		converted, err := adaptor.ConvertOpenAIResponsesRequest(c, info, request)
+		require.NoError(t, err)
+		body := io.LimitReader(bytes.NewBuffer(mustAdvancedCustomRawMessage(t, converted)), 1024)
+		_, err = adaptor.DoRequest(c, info, body)
+		require.ErrorContains(t, err, "not replayable")
+		assert.Empty(t, info.ConversionDiagnostics())
+	})
+	t.Run("bounded metadata exhausted", func(t *testing.T) {
+		adaptor, c, info, request := pipioClaudeResponsesFixture(t, "claude-opus-5", false)
+		converted, err := adaptor.ConvertOpenAIResponsesRequest(c, info, request)
+		require.NoError(t, err)
+		for i := range 32 {
+			info.RecordConversionDiagnostics(c, []types.ConversionDiagnostic{{Code: fmt.Sprintf("fixture-%d", i), Severity: types.ConversionDiagnosticWarning}})
+		}
+		body := bytes.NewBuffer(mustAdvancedCustomRawMessage(t, converted))
+		before := bytes.Clone(body.Bytes())
+		_, err = adaptor.DoRequest(c, info, body)
+		require.ErrorContains(t, err, "metadata was not retained")
+		assert.Equal(t, before, body.Bytes())
+		assert.True(t, info.ConversionDiagnosticsTruncated())
+	})
+	t.Run("selected binding changed before dispatch", func(t *testing.T) {
+		adaptor, c, info, request := pipioClaudeResponsesFixture(t, "claude-opus-5", false)
+		converted, err := adaptor.ConvertOpenAIResponsesRequest(c, info, request)
+		require.NoError(t, err)
+		common.SetContextKey(c, constant.ContextKeyChannelGroup, "other-group")
+		body := bytes.NewBuffer(mustAdvancedCustomRawMessage(t, converted))
+		before := bytes.Clone(body.Bytes())
+		_, err = adaptor.DoRequest(c, info, body)
+		require.ErrorContains(t, err, "binding changed")
+		assert.Equal(t, before, body.Bytes())
+		assert.Empty(t, info.ConversionDiagnostics())
+	})
+}
+
+func pipioClaudeResponsesFixture(t *testing.T, model string, stream bool) (*Adaptor, *gin.Context, *relaycommon.RelayInfo, dto.OpenAIResponsesRequest) {
+	t.Helper()
+	info := advancedCustomRelayInfo(&dto.AdvancedCustomConfig{Routes: []dto.AdvancedCustomRoute{{IncomingPath: "/v1/responses", UpstreamPath: "/v1/chat/completions", Converter: relayconvert.ConverterOpenAIResponsesToOpenAIChat, Models: []string{model}}}})
+	info.RelayFormat = types.RelayFormatOpenAIResponses
+	info.RelayMode = relayconstant.RelayModeResponses
+	info.OriginModelName, info.UpstreamModelName = model, model
+	info.RequestURLPath = "/v1/responses"
+	info.ChannelBaseUrl = "http://ai-upstream-pipio:8080"
+	info.SupportStreamOptions, info.IsStream, info.DisablePing = true, stream, true
+	c := advancedCustomGinContext("/v1/responses")
+	common.SetContextKey(c, constant.ContextKeyChannelName, "panstar-pipio-claude")
+	common.SetContextKey(c, constant.ContextKeyChannelGroup, "panstar_pipio_claude")
+	common.SetContextKey(c, constant.ContextKeyUsingGroup, "default")
+	request := dto.OpenAIResponsesRequest{Model: model, Input: mustAdvancedCustomRawMessage(t, "Reply exactly OK"), MaxOutputTokens: lo.ToPtr(uint(32)), Stream: lo.ToPtr(stream), Temperature: lo.ToPtr(float64(0))}
+	c.Request.Body = io.NopCloser(bytes.NewReader(mustAdvancedCustomRawMessage(t, request)))
+	return &Adaptor{}, c, info, request
+}
+
+type advancedCustomRoundTripFunc func(*http.Request) (*http.Response, error)
+
+func (f advancedCustomRoundTripFunc) RoundTrip(request *http.Request) (*http.Response, error) {
+	return f(request)
 }
 
 func advancedCustomRelayInfo(config *dto.AdvancedCustomConfig) *relaycommon.RelayInfo {
