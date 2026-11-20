@@ -45,6 +45,21 @@ func NewLogOther() *LogOther {
 	return &LogOther{}
 }
 
+// Preserve a provider-generated client correlation ID even after SSE headers
+// have been flushed. It is diagnostic metadata, never a usage or cost claim.
+func (o *LogOther) WithSupplierClientRequestID(id string) *LogOther {
+	if id == "" {
+		return o
+	}
+	copy := NewLogOther()
+	if o != nil {
+		*copy = *o
+		copy.adminInfo = copyLogOtherMap(o.adminInfo)
+	}
+	copy.SetAdmin("supplier_client_request_id", id)
+	return copy
+}
+
 func isReservedLogOtherKey(key string) bool {
 	switch key {
 	case logOtherAdminInfoKey, logOtherRootInfoKey, logOtherAuditInfoKey:

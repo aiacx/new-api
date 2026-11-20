@@ -573,6 +573,13 @@ func doRequest(c *gin.Context, req *http.Request, info *common.RelayInfo) (*http
 	}
 
 	resp, err := relayClient.Do(req)
+	// The pinger can flush/write response headers. Join it before publishing any
+	// supplier metadata; Gin's response header map is not safe for concurrent writes.
+	if stopPinger != nil {
+		stopPinger()
+		<-pingerDone
+		stopPinger = nil
+	}
 	if err != nil {
 		logger.LogError(c, "do request failed: "+err.Error())
 		return nil, types.NewError(err, types.ErrorCodeDoRequestFailed, types.ErrOptionWithHideErrMsg("upstream error: do request failed"))
@@ -592,9 +599,7 @@ func doRequest(c *gin.Context, req *http.Request, info *common.RelayInfo) (*http
 		))
 	}
 
-	if upID := resp.Header.Get(common2.RequestIdKey); upID != "" {
-		c.Set(common2.UpstreamRequestIdKey, upID)
-	}
+	service.CaptureUpstreamRequestID(c, resp.Header)
 
 	_ = req.Body.Close()
 	_ = c.Request.Body.Close()

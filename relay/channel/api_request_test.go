@@ -10,10 +10,38 @@ import (
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/constant"
 	relaycommon "github.com/QuantumNous/new-api/relay/common"
+	"github.com/QuantumNous/new-api/service"
 	"github.com/gin-gonic/gin"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+func TestDoRequestCapturesSupplierIdentityBeforeJSONOrSSEConversion(t *testing.T) {
+	service.InitHttpClient()
+	for _, stream := range []bool{false, true} {
+		for _, status := range []int{http.StatusOK, http.StatusBadGateway} {
+			upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("X-Request-Id", "supplier:original-123")
+				w.WriteHeader(status)
+				_, _ = w.Write([]byte("synthetic"))
+			}))
+			recorder := httptest.NewRecorder()
+			c, _ := gin.CreateTestContext(recorder)
+			c.Request = httptest.NewRequest(http.MethodPost, "/v1/responses", nil)
+			c.Header(common.RequestIdKey, "newapi-local")
+			req, err := http.NewRequest(http.MethodPost, upstream.URL, strings.NewReader("{}"))
+			require.NoError(t, err)
+			resp, err := doRequest(c, req, &relaycommon.RelayInfo{IsStream: stream, DisablePing: true, ChannelMeta: &relaycommon.ChannelMeta{}})
+			require.NoError(t, err)
+			require.NoError(t, resp.Body.Close())
+			assert.Equal(t, "supplier:original-123", c.GetString(common.UpstreamRequestIdKey))
+			assert.Equal(t, "supplier:original-123", c.Writer.Header().Get(service.PanstarSupplierRequestIDHeader))
+			assert.Equal(t, "newapi-local", c.Writer.Header().Get(common.RequestIdKey))
+			assert.False(t, c.Writer.Written(), "capture must precede response conversion and flushing")
+			upstream.Close()
+		}
+	}
+}
 
 func TestExternalBillingForwardsOnlyVerifiedRequestID(t *testing.T) {
 	c, _ := gin.CreateTestContext(httptest.NewRecorder())

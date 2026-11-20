@@ -23,20 +23,64 @@ func CloseResponseBodyGracefully(httpResponse *http.Response) {
 	}
 }
 
-// ShouldCopyUpstreamHeader checks whether a given upstream response header
-// should be copied to the client response. It returns false for Content-Length
-// (managed separately) and X-Oneapi-Request-Id (to preserve the local instance
-// ID). When the upstream header is X-Oneapi-Request-Id, the value is captured
-// into the Gin context for later logging.
-func ShouldCopyUpstreamHeader(c *gin.Context, k string, v []string) bool {
-	if strings.EqualFold(k, "Content-Length") {
+const PanstarSupplierRequestIDHeader = "X-Panstar-Supplier-Request-Id"
+const PanstarSupplierClientRequestIDHeader = "X-Panstar-Supplier-Client-Request-Id"
+
+// CaptureUpstreamRequestID runs before any response conversion or stream write.
+// The supplier's ID and the local New API ID have separate owners. Never infer
+// a supplier ID from the client request, body, or a previous relay attempt.
+func CaptureUpstreamRequestID(c *gin.Context, headers http.Header) {
+	if c == nil {
+		return
+	}
+	c.Set(common.UpstreamRequestIdKey, "")
+	c.Set(common.SupplierClientRequestIDKey, "")
+	if !c.Writer.Written() {
+		c.Header(PanstarSupplierRequestIDHeader, "")
+		c.Header(PanstarSupplierClientRequestIDHeader, "")
+	}
+	if ids := headers.Values("X-Client-Request-ID"); len(ids) == 1 && validSupplierRequestID(ids[0]) {
+		c.Set(common.SupplierClientRequestIDKey, ids[0])
+		if !c.Writer.Written() {
+			c.Header(PanstarSupplierClientRequestIDHeader, ids[0])
+		}
+	}
+	for _, name := range []string{common.RequestIdKey, "X-Request-Id", "Request-Id"} {
+		values := headers.Values(name)
+		if len(values) == 0 {
+			continue
+		}
+		if len(values) != 1 || !validSupplierRequestID(values[0]) {
+			return
+		}
+		c.Set(common.UpstreamRequestIdKey, values[0])
+		if !c.Writer.Written() {
+			c.Header(PanstarSupplierRequestIDHeader, values[0])
+		}
+		return
+	}
+}
+
+func validSupplierRequestID(value string) bool {
+	if len(value) == 0 || len(value) > 128 {
 		return false
 	}
-	if strings.EqualFold(k, common.RequestIdKey) {
-		if c != nil && len(v) > 0 {
-			c.Set(common.UpstreamRequestIdKey, v[0])
+	for _, ch := range value {
+		if !(ch >= 'a' && ch <= 'z' || ch >= 'A' && ch <= 'Z' || ch >= '0' && ch <= '9' || strings.ContainsRune("_.:-", ch)) {
+			return false
 		}
-		return false
+	}
+	return true
+}
+
+// Preserve local request/channel attestation when copying supplier headers.
+func ShouldCopyUpstreamHeader(c *gin.Context, k string, v []string) bool {
+	for _, reserved := range []string{"Content-Length", common.RequestIdKey,
+		"X-Panstar-Request-Id", "X-Panstar-NewAPI-Channel-Id", "X-Panstar-Relay-Stage",
+		PanstarSupplierRequestIDHeader, PanstarSupplierClientRequestIDHeader} {
+		if strings.EqualFold(k, reserved) {
+			return false
+		}
 	}
 	return true
 }
